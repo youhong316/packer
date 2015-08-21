@@ -2,7 +2,7 @@ TEST?=./...
 # Get the current full sha from git
 GITSHA:=$(shell git rev-parse HEAD)
 # Get the current local branch name from git (if we can, this may be blank)
-GITBRANCH:=$(shell git symbolic-ref --short HEAD)
+GITBRANCH:=$(shell git symbolic-ref --short HEAD 2>/dev/null)
 
 default: test vet dev
 
@@ -16,11 +16,12 @@ release: checkversion deps test vet bin
 # We check the git sha when make starts and verify periodically to avoid drift.
 # Don't use -f for this because it will wipe out your changes in development.
 verifysha:
-	@if [ $(GITBRANCH) != "" ]; then git checkout -q $(GITBRANCH); else git checkout -q $(GITSHA); fi
-	@if [ `git rev-parse HEAD` != $(GITSHA) ]; then \
-		echo "ERROR: git checkout has drifted; aborting."; \
+	@if [ "$(GITBRANCH)" != "" ]; then git checkout -q $(GITBRANCH); else git checkout -q $(GITSHA); fi
+	@if [ `git rev-parse HEAD` != "$(GITSHA)" ]; then \
+		echo "ERROR: git checkout has drifted and we weren't able to correct it. Was $(GITBRANCH) ($(GITSHA))"; \
 		exit 1; \
 	fi
+	@echo "INFO: Currently on $(GITBRANCH) ($(GITSHA))"
 
 bin: verifysha
 	@sh -c "$(CURDIR)/scripts/build.sh"
