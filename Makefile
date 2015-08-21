@@ -23,7 +23,7 @@ bin: verifysha
 	@sh -c "$(CURDIR)/scripts/build.sh"
 
 dev:
-	@TF_DEV=1 sh -c "$(CURDIR)/scripts/build.sh"
+	@PACKER_DEV=1 sh -c "$(CURDIR)/scripts/build.sh"
 
 # generate runs `go generate` to build the dynamically generated
 # source files.
