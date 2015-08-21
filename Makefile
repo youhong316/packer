@@ -16,7 +16,7 @@ release: checkversion deps test vet bin
 # We check the git sha when make starts and verify periodically to avoid drift.
 # Don't use -f for this because it will wipe out your changes in development.
 verifysha:
-	@if [ $(GITBRANCH) != "" ]; then git checkout -q $(GITSHA); else git checkout -q $(GITSHA); fi
+	@if [ $(GITBRANCH) != "" ]; then git checkout -q $(GITBRANCH); else git checkout -q $(GITSHA); fi
 	@if [ `git rev-parse HEAD` != $(GITSHA) ]; then echo "ERROR: git sha has drifted; aborting"; exit 1; fi
 
 bin: verifysha
