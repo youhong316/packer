@@ -17,7 +17,10 @@ release: checkversion deps test vet bin
 # Don't use -f for this because it will wipe out your changes in development.
 verifysha:
 	@if [ $(GITBRANCH) != "" ]; then git checkout -q $(GITBRANCH); else git checkout -q $(GITSHA); fi
-	@if [ `git rev-parse HEAD` != $(GITSHA) ]; then echo "ERROR: git sha has drifted; aborting"; exit 1; fi
+	@if [ `git rev-parse HEAD` != $(GITSHA) ]; then \
+		echo "ERROR: git checkout has drifted; aborting."; \
+		exit 1; \
+	fi
 
 bin: verifysha
 	@sh -c "$(CURDIR)/scripts/build.sh"
@@ -36,9 +39,7 @@ test: verifysha
 
 # testacc runs acceptance tests
 testacc: generate
-	@echo ""
-	@echo "WARN: Acceptance tests will take a long time to run. Ctrl-C if you want to cancel."
-	@echo ""
+	@echo "WARN: Acceptance tests will take a long time to run and may cost money. Ctrl-C if you want to cancel."
 	PACKER_ACC=1 go test -v $(TEST) $(TESTARGS) -timeout=45m
 
 testrace:
@@ -46,16 +47,17 @@ testrace:
 
 checkversion:
 	@grep 'const VersionPrerelease = ""' version.go > /dev/null || \
-		echo "WARN: You must remove prerelease tags from version.go prior to release." && \
+		echo "ERROR: You must remove prerelease tags from version.go prior to release." && \
 		exit 1
 
 # Don't call this directly. Use deps instead. The reason is that we have to use
 # make dependency targets to verifysha, and we can't call them via $(MAKE) or
 # they will execute in a submake which may be operating on a different commit.
 depsinternal:
-	@git diff-index --quiet HEAD || \
-		echo "ERROR: Your git working tree has uncommitted changes. deps will fail. Please stash or commit your changes first.";
-		exit 1
+	@git diff-index --quiet HEAD ; if [ $$? -ne 0 ]; then \
+		echo "ERROR: Your git working tree has uncommitted changes. deps will fail. Please stash or commit your changes first." ; \
+		exit 1 ; \
+	fi
 	go get -u github.com/mitchellh/gox
 	go get -u golang.org/x/tools/cmd/stringer
 	go list ./... \
@@ -66,9 +68,7 @@ depsinternal:
 		| xargs go get -f -u -v -d
 
 updatedeps:
-	@echo ""
-	@echo "WARN: Please use `make deps` instead"
-	@echo ""
+	@echo "WARN: Please use `make deps` instead."
 	$(MAKE) deps
 
 vet: verifysha
@@ -76,7 +76,6 @@ vet: verifysha
 		go get golang.org/x/tools/cmd/vet; \
 	fi
 	@go vet $(TEST) ; if [ $$? -eq 1 ]; then \
-		echo ""; \
 		echo "ERROR: Vet found problems in the code."; \
 		exit 1; \
 	fi
