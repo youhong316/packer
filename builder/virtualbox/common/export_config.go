@@ -3,11 +3,11 @@ package common
 import (
 	"errors"
 
-	"github.com/mitchellh/packer/template/interpolate"
+	"github.com/hashicorp/packer/template/interpolate"
 )
 
 type ExportConfig struct {
-	Format string `mapstruture:"format"`
+	Format string `mapstructure:"format"`
 }
 
 func (c *ExportConfig) Prepare(ctx *interpolate.Context) []error {

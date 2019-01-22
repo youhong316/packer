@@ -4,17 +4,16 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"math/rand"
 	"strings"
-	"time"
 
-	"github.com/mitchellh/multistep"
-	vboxcommon "github.com/mitchellh/packer/builder/virtualbox/common"
-	"github.com/mitchellh/packer/common"
-	"github.com/mitchellh/packer/helper/communicator"
-	"github.com/mitchellh/packer/helper/config"
-	"github.com/mitchellh/packer/packer"
-	"github.com/mitchellh/packer/template/interpolate"
+	vboxcommon "github.com/hashicorp/packer/builder/virtualbox/common"
+	"github.com/hashicorp/packer/common"
+	"github.com/hashicorp/packer/common/bootcommand"
+	"github.com/hashicorp/packer/helper/communicator"
+	"github.com/hashicorp/packer/helper/config"
+	"github.com/hashicorp/packer/helper/multistep"
+	"github.com/hashicorp/packer/packer"
+	"github.com/hashicorp/packer/template/interpolate"
 )
 
 const BuilderId = "mitchellh.virtualbox"
@@ -26,32 +25,36 @@ type Builder struct {
 
 type Config struct {
 	common.PackerConfig             `mapstructure:",squash"`
+	common.HTTPConfig               `mapstructure:",squash"`
+	common.ISOConfig                `mapstructure:",squash"`
+	common.FloppyConfig             `mapstructure:",squash"`
+	bootcommand.BootConfig          `mapstructure:",squash"`
 	vboxcommon.ExportConfig         `mapstructure:",squash"`
 	vboxcommon.ExportOpts           `mapstructure:",squash"`
-	vboxcommon.FloppyConfig         `mapstructure:",squash"`
 	vboxcommon.OutputConfig         `mapstructure:",squash"`
 	vboxcommon.RunConfig            `mapstructure:",squash"`
 	vboxcommon.ShutdownConfig       `mapstructure:",squash"`
 	vboxcommon.SSHConfig            `mapstructure:",squash"`
+	vboxcommon.HWConfig             `mapstructure:",squash"`
 	vboxcommon.VBoxManageConfig     `mapstructure:",squash"`
 	vboxcommon.VBoxManagePostConfig `mapstructure:",squash"`
 	vboxcommon.VBoxVersionConfig    `mapstructure:",squash"`
+	vboxcommon.VBoxBundleConfig     `mapstructure:",squash"`
 
-	BootCommand          []string `mapstructure:"boot_command"`
-	DiskSize             uint     `mapstructure:"disk_size"`
-	GuestAdditionsMode   string   `mapstructure:"guest_additions_mode"`
-	GuestAdditionsPath   string   `mapstructure:"guest_additions_path"`
-	GuestAdditionsURL    string   `mapstructure:"guest_additions_url"`
-	GuestAdditionsSHA256 string   `mapstructure:"guest_additions_sha256"`
-	GuestOSType          string   `mapstructure:"guest_os_type"`
-	HardDriveInterface   string   `mapstructure:"hard_drive_interface"`
-	ISOChecksum          string   `mapstructure:"iso_checksum"`
-	ISOChecksumType      string   `mapstructure:"iso_checksum_type"`
-	ISOInterface         string   `mapstructure:"iso_interface"`
-	ISOUrls              []string `mapstructure:"iso_urls"`
-	VMName               string   `mapstructure:"vm_name"`
-
-	RawSingleISOUrl string `mapstructure:"iso_url"`
+	DiskSize               uint   `mapstructure:"disk_size"`
+	GuestAdditionsMode     string `mapstructure:"guest_additions_mode"`
+	GuestAdditionsPath     string `mapstructure:"guest_additions_path"`
+	GuestAdditionsSHA256   string `mapstructure:"guest_additions_sha256"`
+	GuestAdditionsURL      string `mapstructure:"guest_additions_url"`
+	GuestOSType            string `mapstructure:"guest_os_type"`
+	HardDriveDiscard       bool   `mapstructure:"hard_drive_discard"`
+	HardDriveInterface     string `mapstructure:"hard_drive_interface"`
+	SATAPortCount          int    `mapstructure:"sata_port_count"`
+	HardDriveNonrotational bool   `mapstructure:"hard_drive_nonrotational"`
+	ISOInterface           string `mapstructure:"iso_interface"`
+	KeepRegistered         bool   `mapstructure:"keep_registered"`
+	SkipExport             bool   `mapstructure:"skip_export"`
+	VMName                 string `mapstructure:"vm_name"`
 
 	ctx interpolate.Context
 }
@@ -76,18 +79,27 @@ func (b *Builder) Prepare(raws ...interface{}) ([]string, error) {
 
 	// Accumulate any errors and warnings
 	var errs *packer.MultiError
+	warnings := make([]string, 0)
+
+	isoWarnings, isoErrs := b.config.ISOConfig.Prepare(&b.config.ctx)
+	warnings = append(warnings, isoWarnings...)
+	errs = packer.MultiErrorAppend(errs, isoErrs...)
+
 	errs = packer.MultiErrorAppend(errs, b.config.ExportConfig.Prepare(&b.config.ctx)...)
 	errs = packer.MultiErrorAppend(errs, b.config.ExportOpts.Prepare(&b.config.ctx)...)
 	errs = packer.MultiErrorAppend(errs, b.config.FloppyConfig.Prepare(&b.config.ctx)...)
 	errs = packer.MultiErrorAppend(
 		errs, b.config.OutputConfig.Prepare(&b.config.ctx, &b.config.PackerConfig)...)
+	errs = packer.MultiErrorAppend(errs, b.config.HTTPConfig.Prepare(&b.config.ctx)...)
 	errs = packer.MultiErrorAppend(errs, b.config.RunConfig.Prepare(&b.config.ctx)...)
 	errs = packer.MultiErrorAppend(errs, b.config.ShutdownConfig.Prepare(&b.config.ctx)...)
 	errs = packer.MultiErrorAppend(errs, b.config.SSHConfig.Prepare(&b.config.ctx)...)
+	errs = packer.MultiErrorAppend(errs, b.config.HWConfig.Prepare(&b.config.ctx)...)
+	errs = packer.MultiErrorAppend(errs, b.config.VBoxBundleConfig.Prepare(&b.config.ctx)...)
 	errs = packer.MultiErrorAppend(errs, b.config.VBoxManageConfig.Prepare(&b.config.ctx)...)
 	errs = packer.MultiErrorAppend(errs, b.config.VBoxManagePostConfig.Prepare(&b.config.ctx)...)
 	errs = packer.MultiErrorAppend(errs, b.config.VBoxVersionConfig.Prepare(&b.config.ctx)...)
-	warnings := make([]string, 0)
+	errs = packer.MultiErrorAppend(errs, b.config.BootConfig.Prepare(&b.config.ctx)...)
 
 	if b.config.DiskSize == 0 {
 		b.config.DiskSize = 40000
@@ -123,48 +135,18 @@ func (b *Builder) Prepare(raws ...interface{}) ([]string, error) {
 			errs, errors.New("hard_drive_interface can only be ide, sata, or scsi"))
 	}
 
-	if b.config.ISOChecksumType == "" {
-		errs = packer.MultiErrorAppend(
-			errs, errors.New("The iso_checksum_type must be specified."))
-	} else {
-		b.config.ISOChecksumType = strings.ToLower(b.config.ISOChecksumType)
-		if b.config.ISOChecksumType != "none" {
-			if b.config.ISOChecksum == "" {
-				errs = packer.MultiErrorAppend(
-					errs, errors.New("Due to large file sizes, an iso_checksum is required"))
-			} else {
-				b.config.ISOChecksum = strings.ToLower(b.config.ISOChecksum)
-			}
+	if b.config.SATAPortCount == 0 {
+		b.config.SATAPortCount = 1
+	}
 
-			if h := common.HashForType(b.config.ISOChecksumType); h == nil {
-				errs = packer.MultiErrorAppend(
-					errs,
-					fmt.Errorf("Unsupported checksum type: %s", b.config.ISOChecksumType))
-			}
-		}
+	if b.config.SATAPortCount > 30 {
+		errs = packer.MultiErrorAppend(
+			errs, errors.New("sata_port_count cannot be greater than 30"))
 	}
 
 	if b.config.ISOInterface != "ide" && b.config.ISOInterface != "sata" {
 		errs = packer.MultiErrorAppend(
 			errs, errors.New("iso_interface can only be ide or sata"))
-	}
-
-	if b.config.RawSingleISOUrl == "" && len(b.config.ISOUrls) == 0 {
-		errs = packer.MultiErrorAppend(
-			errs, errors.New("One of iso_url or iso_urls must be specified."))
-	} else if b.config.RawSingleISOUrl != "" && len(b.config.ISOUrls) > 0 {
-		errs = packer.MultiErrorAppend(
-			errs, errors.New("Only one of iso_url or iso_urls may be specified."))
-	} else if b.config.RawSingleISOUrl != "" {
-		b.config.ISOUrls = []string{b.config.RawSingleISOUrl}
-	}
-
-	for i, url := range b.config.ISOUrls {
-		b.config.ISOUrls[i], err = common.DownloadableURL(url)
-		if err != nil {
-			errs = packer.MultiErrorAppend(
-				errs, fmt.Errorf("Failed to parse iso_url %d: %s", i+1, err))
-		}
 	}
 
 	validMode := false
@@ -191,12 +173,6 @@ func (b *Builder) Prepare(raws ...interface{}) ([]string, error) {
 	}
 
 	// Warnings
-	if b.config.ISOChecksumType == "none" {
-		warnings = append(warnings,
-			"A checksum type of 'none' was specified. Since ISO files are so big,\n"+
-				"a checksum is highly recommended.")
-	}
-
 	if b.config.ShutdownCommand == "" {
 		warnings = append(warnings,
 			"A shutdown_command was not specified. Without a shutdown command, Packer\n"+
@@ -211,9 +187,6 @@ func (b *Builder) Prepare(raws ...interface{}) ([]string, error) {
 }
 
 func (b *Builder) Run(ui packer.Ui, hook packer.Hook, cache packer.Cache) (packer.Artifact, error) {
-	// Seed the random number generator
-	rand.Seed(time.Now().UTC().UnixNano())
-
 	// Create the driver that we'll use to communicate with VirtualBox
 	driver, err := vboxcommon.NewDriver()
 	if err != nil {
@@ -231,18 +204,20 @@ func (b *Builder) Run(ui packer.Ui, hook packer.Hook, cache packer.Cache) (packe
 			Checksum:     b.config.ISOChecksum,
 			ChecksumType: b.config.ISOChecksumType,
 			Description:  "ISO",
+			Extension:    b.config.TargetExtension,
 			ResultKey:    "iso_path",
+			TargetPath:   b.config.TargetPath,
 			Url:          b.config.ISOUrls,
-			Extension:    "iso",
 		},
-		&vboxcommon.StepOutputDir{
+		&common.StepOutputDir{
 			Force: b.config.PackerForce,
 			Path:  b.config.OutputDir,
 		},
 		&common.StepCreateFloppy{
-			Files: b.config.FloppyFiles,
+			Files:       b.config.FloppyConfig.FloppyFiles,
+			Directories: b.config.FloppyConfig.FloppyDirectories,
 		},
-		&vboxcommon.StepHTTPServer{
+		&common.StepHTTPServer{
 			HTTPDir:     b.config.HTTPDir,
 			HTTPPortMin: b.config.HTTPPortMin,
 			HTTPPortMax: b.config.HTTPPortMax,
@@ -253,6 +228,11 @@ func (b *Builder) Run(ui packer.Ui, hook packer.Hook, cache packer.Cache) (packe
 		new(stepAttachISO),
 		&vboxcommon.StepAttachGuestAdditions{
 			GuestAdditionsMode: b.config.GuestAdditionsMode,
+		},
+		&vboxcommon.StepConfigureVRDP{
+			VRDPBindAddress: b.config.VRDPBindAddress,
+			VRDPPortMin:     b.config.VRDPPortMin,
+			VRDPPortMax:     b.config.VRDPPortMax,
 		},
 		new(vboxcommon.StepAttachFloppy),
 		&vboxcommon.StepForwardSSH{
@@ -266,22 +246,24 @@ func (b *Builder) Run(ui packer.Ui, hook packer.Hook, cache packer.Cache) (packe
 			Ctx:      b.config.ctx,
 		},
 		&vboxcommon.StepRun{
-			BootWait: b.config.BootWait,
 			Headless: b.config.Headless,
 		},
 		&vboxcommon.StepTypeBootCommand{
-			BootCommand: b.config.BootCommand,
-			VMName:      b.config.VMName,
-			Ctx:         b.config.ctx,
+			BootWait:      b.config.BootWait,
+			BootCommand:   b.config.FlatBootCommand(),
+			VMName:        b.config.VMName,
+			Ctx:           b.config.ctx,
+			GroupInterval: b.config.BootConfig.BootGroupInterval,
 		},
 		&communicator.StepConnect{
 			Config:    &b.config.SSHConfig.Comm,
-			Host:      vboxcommon.CommHost,
-			SSHConfig: vboxcommon.SSHConfigFunc(b.config.SSHConfig),
+			Host:      vboxcommon.CommHost(b.config.SSHConfig.Comm.SSHHost),
+			SSHConfig: b.config.SSHConfig.Comm.SSHConfigFunc(),
 			SSHPort:   vboxcommon.SSHPort,
+			WinRMPort: vboxcommon.SSHPort,
 		},
 		&vboxcommon.StepUploadVersion{
-			Path: b.config.VBoxVersionFile,
+			Path: *b.config.VBoxVersionFile,
 		},
 		&vboxcommon.StepUploadGuestAdditions{
 			GuestAdditionsMode: b.config.GuestAdditionsMode,
@@ -289,11 +271,17 @@ func (b *Builder) Run(ui packer.Ui, hook packer.Hook, cache packer.Cache) (packe
 			Ctx:                b.config.ctx,
 		},
 		new(common.StepProvision),
+		&common.StepCleanupTempKeys{
+			Comm: &b.config.SSHConfig.Comm,
+		},
 		&vboxcommon.StepShutdown{
 			Command: b.config.ShutdownCommand,
 			Timeout: b.config.ShutdownTimeout,
+			Delay:   b.config.PostShutdownDelay,
 		},
-		new(vboxcommon.StepRemoveDevices),
+		&vboxcommon.StepRemoveDevices{
+			Bundling: b.config.VBoxBundleConfig,
+		},
 		&vboxcommon.StepVBoxManage{
 			Commands: b.config.VBoxManagePost,
 			Ctx:      b.config.ctx,
@@ -302,7 +290,9 @@ func (b *Builder) Run(ui packer.Ui, hook packer.Hook, cache packer.Cache) (packe
 			Format:         b.config.Format,
 			OutputDir:      b.config.OutputDir,
 			ExportOpts:     b.config.ExportOpts.ExportOpts,
+			Bundling:       b.config.VBoxBundleConfig,
 			SkipNatMapping: b.config.SSHSkipNatMapping,
+			SkipExport:     b.config.SkipExport,
 		},
 	}
 
@@ -310,20 +300,13 @@ func (b *Builder) Run(ui packer.Ui, hook packer.Hook, cache packer.Cache) (packe
 	state := new(multistep.BasicStateBag)
 	state.Put("cache", cache)
 	state.Put("config", &b.config)
+	state.Put("debug", b.config.PackerDebug)
 	state.Put("driver", driver)
 	state.Put("hook", hook)
 	state.Put("ui", ui)
 
 	// Run
-	if b.config.PackerDebug {
-		b.runner = &multistep.DebugRunner{
-			Steps:   steps,
-			PauseFn: common.MultistepDebugFn(ui),
-		}
-	} else {
-		b.runner = &multistep.BasicRunner{Steps: steps}
-	}
-
+	b.runner = common.NewRunnerWithPauseFn(steps, b.config.PackerConfig, ui, state)
 	b.runner.Run(state)
 
 	// If there was an error, return that

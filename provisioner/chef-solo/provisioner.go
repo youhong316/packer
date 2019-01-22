@@ -12,11 +12,31 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/mitchellh/packer/common"
-	"github.com/mitchellh/packer/helper/config"
-	"github.com/mitchellh/packer/packer"
-	"github.com/mitchellh/packer/template/interpolate"
+	"github.com/hashicorp/packer/common"
+	"github.com/hashicorp/packer/helper/config"
+	"github.com/hashicorp/packer/packer"
+	"github.com/hashicorp/packer/provisioner"
+	"github.com/hashicorp/packer/template/interpolate"
 )
+
+type guestOSTypeConfig struct {
+	executeCommand string
+	installCommand string
+	stagingDir     string
+}
+
+var guestOSTypeConfigs = map[string]guestOSTypeConfig{
+	provisioner.UnixOSType: {
+		executeCommand: "{{if .Sudo}}sudo {{end}}chef-solo --no-color -c {{.ConfigPath}} -j {{.JsonPath}}",
+		installCommand: "curl -L https://omnitruck.chef.io/install.sh | {{if .Sudo}}sudo {{end}}bash -s --{{if .Version}} -v {{.Version}}{{end}}",
+		stagingDir:     "/tmp/packer-chef-solo",
+	},
+	provisioner.WindowsOSType: {
+		executeCommand: "c:/opscode/chef/bin/chef-solo.bat --no-color -c {{.ConfigPath}} -j {{.JsonPath}}",
+		installCommand: "powershell.exe -Command \". { iwr -useb https://omnitruck.chef.io/install.ps1 } | iex; Install-Project{{if .Version}} -version {{.Version}}{{end}}\"",
+		stagingDir:     "C:/Windows/Temp/packer-chef-solo",
+	},
+}
 
 type Config struct {
 	common.PackerConfig `mapstructure:",squash"`
@@ -36,12 +56,16 @@ type Config struct {
 	RunList                    []string `mapstructure:"run_list"`
 	SkipInstall                bool     `mapstructure:"skip_install"`
 	StagingDir                 string   `mapstructure:"staging_directory"`
+	GuestOSType                string   `mapstructure:"guest_os_type"`
+	Version                    string   `mapstructure:"version"`
 
 	ctx interpolate.Context
 }
 
 type Provisioner struct {
-	config Config
+	config            Config
+	guestOSTypeConfig guestOSTypeConfig
+	guestCommands     *provisioner.GuestCommands
 }
 
 type ConfigTemplate struct {
@@ -68,7 +92,8 @@ type ExecuteTemplate struct {
 }
 
 type InstallChefTemplate struct {
-	Sudo bool
+	Sudo    bool
+	Version string
 }
 
 func (p *Provisioner) Prepare(raws ...interface{}) error {
@@ -86,12 +111,28 @@ func (p *Provisioner) Prepare(raws ...interface{}) error {
 		return err
 	}
 
+	if p.config.GuestOSType == "" {
+		p.config.GuestOSType = provisioner.DefaultOSType
+	}
+	p.config.GuestOSType = strings.ToLower(p.config.GuestOSType)
+
+	var ok bool
+	p.guestOSTypeConfig, ok = guestOSTypeConfigs[p.config.GuestOSType]
+	if !ok {
+		return fmt.Errorf("Invalid guest_os_type: \"%s\"", p.config.GuestOSType)
+	}
+
+	p.guestCommands, err = provisioner.NewGuestCommands(p.config.GuestOSType, !p.config.PreventSudo)
+	if err != nil {
+		return fmt.Errorf("Invalid guest_os_type: \"%s\"", p.config.GuestOSType)
+	}
+
 	if p.config.ExecuteCommand == "" {
-		p.config.ExecuteCommand = "{{if .Sudo}}sudo {{end}}chef-solo --no-color -c {{.ConfigPath}} -j {{.JsonPath}}"
+		p.config.ExecuteCommand = p.guestOSTypeConfig.executeCommand
 	}
 
 	if p.config.InstallCommand == "" {
-		p.config.InstallCommand = "curl -L https://www.chef.io/chef/install.sh | {{if .Sudo}}sudo {{end}}bash"
+		p.config.InstallCommand = p.guestOSTypeConfig.installCommand
 	}
 
 	if p.config.RunList == nil {
@@ -99,7 +140,7 @@ func (p *Provisioner) Prepare(raws ...interface{}) error {
 	}
 
 	if p.config.StagingDir == "" {
-		p.config.StagingDir = "/tmp/packer-chef-solo"
+		p.config.StagingDir = p.guestOSTypeConfig.stagingDir
 	}
 
 	var errs *packer.MultiError
@@ -190,7 +231,7 @@ func (p *Provisioner) Provision(ui packer.Ui, comm packer.Communicator) error {
 	ui.Say("Provisioning with chef-solo")
 
 	if !p.config.SkipInstall {
-		if err := p.installChef(ui, comm); err != nil {
+		if err := p.installChef(ui, comm, p.config.Version); err != nil {
 			return fmt.Errorf("Error installing Chef: %s", err)
 		}
 	}
@@ -374,16 +415,22 @@ func (p *Provisioner) createJson(ui packer.Ui, comm packer.Communicator) (string
 
 func (p *Provisioner) createDir(ui packer.Ui, comm packer.Communicator, dir string) error {
 	ui.Message(fmt.Sprintf("Creating directory: %s", dir))
-	cmd := &packer.RemoteCmd{
-		Command: fmt.Sprintf("mkdir -p '%s'", dir),
-	}
 
+	cmd := &packer.RemoteCmd{Command: p.guestCommands.CreateDir(dir)}
 	if err := cmd.StartWithUi(comm, ui); err != nil {
 		return err
 	}
-
 	if cmd.ExitStatus != 0 {
-		return fmt.Errorf("Non-zero exit status.")
+		return fmt.Errorf("Non-zero exit status. See output above for more info.")
+	}
+
+	// Chmod the directory to 0777 just so that we can access it as our user
+	cmd = &packer.RemoteCmd{Command: p.guestCommands.Chmod(dir, "0777")}
+	if err := cmd.StartWithUi(comm, ui); err != nil {
+		return err
+	}
+	if cmd.ExitStatus != 0 {
+		return fmt.Errorf("Non-zero exit status. See output above for more info.")
 	}
 
 	return nil
@@ -417,11 +464,12 @@ func (p *Provisioner) executeChef(ui packer.Ui, comm packer.Communicator, config
 	return nil
 }
 
-func (p *Provisioner) installChef(ui packer.Ui, comm packer.Communicator) error {
+func (p *Provisioner) installChef(ui packer.Ui, comm packer.Communicator, version string) error {
 	ui.Message("Installing Chef...")
 
 	p.config.ctx.Data = &InstallChefTemplate{
-		Sudo: !p.config.PreventSudo,
+		Sudo:    !p.config.PreventSudo,
+		Version: version,
 	}
 	command, err := interpolate.Render(p.config.InstallCommand, &p.config.ctx)
 	if err != nil {

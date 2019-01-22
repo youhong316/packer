@@ -29,7 +29,6 @@ type MockDriver struct {
 	IPAddressErr    error
 
 	LoginCalled   bool
-	LoginEmail    string
 	LoginUsername string
 	LoginPassword string
 	LoginRepo     string
@@ -76,7 +75,7 @@ type MockDriver struct {
 	VersionVersion string
 }
 
-func (d *MockDriver) Commit(id string) (string, error) {
+func (d *MockDriver) Commit(id string, author string, changes []string, message string) (string, error) {
 	d.CommitCalled = true
 	d.CommitContainerId = id
 	return d.CommitImageId, d.CommitErr
@@ -102,7 +101,7 @@ func (d *MockDriver) Export(id string, dst io.Writer) error {
 	return d.ExportError
 }
 
-func (d *MockDriver) Import(path, repo string) (string, error) {
+func (d *MockDriver) Import(path string, changes []string, repo string) (string, error) {
 	d.ImportCalled = true
 	d.ImportPath = path
 	d.ImportRepo = repo
@@ -115,10 +114,9 @@ func (d *MockDriver) IPAddress(id string) (string, error) {
 	return d.IPAddressResult, d.IPAddressErr
 }
 
-func (d *MockDriver) Login(r, e, u, p string) error {
+func (d *MockDriver) Login(r, u, p string) error {
 	d.LoginCalled = true
 	d.LoginRepo = r
-	d.LoginEmail = e
 	d.LoginUsername = u
 	d.LoginPassword = p
 	return d.LoginErr

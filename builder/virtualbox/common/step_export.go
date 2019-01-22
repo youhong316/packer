@@ -1,13 +1,15 @@
 package common
 
 import (
+	"context"
 	"fmt"
-	"github.com/mitchellh/multistep"
-	"github.com/mitchellh/packer/packer"
 	"log"
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/hashicorp/packer/helper/multistep"
+	"github.com/hashicorp/packer/packer"
 )
 
 // This step cleans up forwarded ports and exports the VM to an OVF.
@@ -20,13 +22,29 @@ type StepExport struct {
 	Format         string
 	OutputDir      string
 	ExportOpts     []string
+	Bundling       VBoxBundleConfig
 	SkipNatMapping bool
+	SkipExport     bool
 }
 
-func (s *StepExport) Run(state multistep.StateBag) multistep.StepAction {
+func (s *StepExport) Run(_ context.Context, state multistep.StateBag) multistep.StepAction {
+	// If ISO export is configured, ensure this option is propagated to VBoxManage.
+	for _, option := range s.ExportOpts {
+		if option == "--iso" || option == "-I" {
+			s.ExportOpts = append(s.ExportOpts, "--iso")
+			break
+		}
+	}
+
 	driver := state.Get("driver").(Driver)
 	ui := state.Get("ui").(packer.Ui)
 	vmName := state.Get("vmName").(string)
+
+	// Skip export if requested
+	if s.SkipExport {
+		ui.Say("Skipping export of virtual machine...")
+		return multistep.ActionContinue
+	}
 
 	// Wait a second to ensure VM is really shutdown.
 	log.Println("1 second timeout to ensure VM is really shutdown")
@@ -34,11 +52,11 @@ func (s *StepExport) Run(state multistep.StateBag) multistep.StepAction {
 	ui.Say("Preparing to export machine...")
 
 	// Clear out the Packer-created forwarding rule
-	if !s.SkipNatMapping {
+	sshPort := state.Get("sshHostPort")
+	if !s.SkipNatMapping && sshPort != 0 {
 		ui.Message(fmt.Sprintf(
-			"Deleting forwarded port mapping for SSH (host port %d)",
-			state.Get("sshHostPort")))
-		command := []string{"modifyvm", vmName, "--natpf1", "delete", "packerssh"}
+			"Deleting forwarded port mapping for the communicator (SSH, WinRM, etc) (host port %d)", sshPort))
+		command := []string{"modifyvm", vmName, "--natpf1", "delete", "packercomm"}
 		if err := driver.VBoxManage(command...); err != nil {
 			err := fmt.Errorf("Error deleting port forwarding rule: %s", err)
 			state.Put("error", err)

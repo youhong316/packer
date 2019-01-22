@@ -10,13 +10,13 @@ import (
 	"strings"
 
 	"github.com/aws/aws-sdk-go/service/ec2"
-	"github.com/mitchellh/multistep"
-	awscommon "github.com/mitchellh/packer/builder/amazon/common"
-	"github.com/mitchellh/packer/common"
-	"github.com/mitchellh/packer/helper/communicator"
-	"github.com/mitchellh/packer/helper/config"
-	"github.com/mitchellh/packer/packer"
-	"github.com/mitchellh/packer/template/interpolate"
+	awscommon "github.com/hashicorp/packer/builder/amazon/common"
+	"github.com/hashicorp/packer/common"
+	"github.com/hashicorp/packer/helper/communicator"
+	"github.com/hashicorp/packer/helper/config"
+	"github.com/hashicorp/packer/helper/multistep"
+	"github.com/hashicorp/packer/packer"
+	"github.com/hashicorp/packer/template/interpolate"
 )
 
 // The unique ID for this builder
@@ -62,13 +62,23 @@ func (b *Builder) Prepare(raws ...interface{}) ([]string, error) {
 		InterpolateContext: &b.config.ctx,
 		InterpolateFilter: &interpolate.RenderFilter{
 			Exclude: []string{
+				"ami_description",
 				"bundle_upload_command",
 				"bundle_vol_command",
+				"run_tags",
+				"run_volume_tags",
+				"snapshot_tags",
+				"tags",
+				"spot_tags",
 			},
 		},
 	}, configs...)
 	if err != nil {
 		return nil, err
+	}
+
+	if b.config.PackerConfig.PackerForce {
+		b.config.AMIForceDeregister = true
 	}
 
 	if b.config.BundleDestination == "" {
@@ -118,7 +128,8 @@ func (b *Builder) Prepare(raws ...interface{}) ([]string, error) {
 	var errs *packer.MultiError
 	errs = packer.MultiErrorAppend(errs, b.config.AccessConfig.Prepare(&b.config.ctx)...)
 	errs = packer.MultiErrorAppend(errs, b.config.BlockDevices.Prepare(&b.config.ctx)...)
-	errs = packer.MultiErrorAppend(errs, b.config.AMIConfig.Prepare(&b.config.ctx)...)
+	errs = packer.MultiErrorAppend(errs,
+		b.config.AMIConfig.Prepare(&b.config.AccessConfig, &b.config.ctx)...)
 	errs = packer.MultiErrorAppend(errs, b.config.RunConfig.Prepare(&b.config.ctx)...)
 
 	if b.config.AccountId == "" {
@@ -145,28 +156,74 @@ func (b *Builder) Prepare(raws ...interface{}) ([]string, error) {
 			errs, fmt.Errorf("x509_key_path points to bad file: %s", err))
 	}
 
+	if b.config.IsSpotInstance() && ((b.config.AMIENASupport != nil && *b.config.AMIENASupport) || b.config.AMISriovNetSupport) {
+		errs = packer.MultiErrorAppend(errs,
+			fmt.Errorf("Spot instances do not support modification, which is required "+
+				"when either `ena_support` or `sriov_support` are set. Please ensure "+
+				"you use an AMI that already has either SR-IOV or ENA enabled."))
+	}
+
 	if errs != nil && len(errs.Errors) > 0 {
 		return nil, errs
 	}
-
-	log.Println(common.ScrubConfig(b.config, b.config.AccessKey, b.config.SecretKey))
+	packer.LogSecretFilter.Set(b.config.AccessKey, b.config.SecretKey, b.config.Token)
 	return nil, nil
 }
 
 func (b *Builder) Run(ui packer.Ui, hook packer.Hook, cache packer.Cache) (packer.Artifact, error) {
-	config, err := b.config.Config()
+	session, err := b.config.Session()
 	if err != nil {
 		return nil, err
 	}
-
-	ec2conn := ec2.New(config)
+	ec2conn := ec2.New(session)
 
 	// Setup the state bag and initial state for the steps
 	state := new(multistep.BasicStateBag)
 	state.Put("config", &b.config)
 	state.Put("ec2", ec2conn)
+	state.Put("awsSession", session)
 	state.Put("hook", hook)
 	state.Put("ui", ui)
+
+	var instanceStep multistep.Step
+
+	if b.config.IsSpotInstance() {
+		instanceStep = &awscommon.StepRunSpotInstance{
+			AssociatePublicIpAddress: b.config.AssociatePublicIpAddress,
+			BlockDevices:             b.config.BlockDevices,
+			BlockDurationMinutes:     b.config.BlockDurationMinutes,
+			Ctx:                      b.config.ctx,
+			Comm:                     &b.config.RunConfig.Comm,
+			Debug:                    b.config.PackerDebug,
+			EbsOptimized:             b.config.EbsOptimized,
+			IamInstanceProfile:       b.config.IamInstanceProfile,
+			InstanceType:             b.config.InstanceType,
+			SourceAMI:                b.config.SourceAmi,
+			SpotPrice:                b.config.SpotPrice,
+			SpotPriceProduct:         b.config.SpotPriceAutoProduct,
+			Tags:                     b.config.RunTags,
+			SpotTags:                 b.config.SpotTags,
+			UserData:                 b.config.UserData,
+			UserDataFile:             b.config.UserDataFile,
+		}
+	} else {
+		instanceStep = &awscommon.StepRunSourceInstance{
+			AssociatePublicIpAddress: b.config.AssociatePublicIpAddress,
+			BlockDevices:             b.config.BlockDevices,
+			Comm:                     &b.config.RunConfig.Comm,
+			Ctx:                      b.config.ctx,
+			Debug:                    b.config.PackerDebug,
+			EbsOptimized:             b.config.EbsOptimized,
+			EnableT2Unlimited:        b.config.EnableT2Unlimited,
+			IamInstanceProfile:       b.config.IamInstanceProfile,
+			InstanceType:             b.config.InstanceType,
+			IsRestricted:             b.config.IsChinaCloud() || b.config.IsGovCloud(),
+			SourceAMI:                b.config.SourceAmi,
+			Tags:                     b.config.RunTags,
+			UserData:                 b.config.UserData,
+			UserDataFile:             b.config.UserDataFile,
+		}
+	}
 
 	// Build the steps
 	steps := []multistep.Step{
@@ -175,50 +232,50 @@ func (b *Builder) Run(ui packer.Ui, hook packer.Hook, cache packer.Cache) (packe
 			ForceDeregister: b.config.AMIForceDeregister,
 		},
 		&awscommon.StepSourceAMIInfo{
-			SourceAmi:          b.config.SourceAmi,
-			EnhancedNetworking: b.config.AMIEnhancedNetworking,
+			SourceAmi:                b.config.SourceAmi,
+			EnableAMISriovNetSupport: b.config.AMISriovNetSupport,
+			EnableAMIENASupport:      b.config.AMIENASupport,
+			AmiFilters:               b.config.SourceAmiFilter,
+			AMIVirtType:              b.config.AMIVirtType,
+		},
+		&awscommon.StepNetworkInfo{
+			VpcId:               b.config.VpcId,
+			VpcFilter:           b.config.VpcFilter,
+			SecurityGroupIds:    b.config.SecurityGroupIds,
+			SecurityGroupFilter: b.config.SecurityGroupFilter,
+			SubnetId:            b.config.SubnetId,
+			SubnetFilter:        b.config.SubnetFilter,
+			AvailabilityZone:    b.config.AvailabilityZone,
 		},
 		&awscommon.StepKeyPair{
-			Debug:                b.config.PackerDebug,
-			DebugKeyPath:         fmt.Sprintf("ec2_%s.pem", b.config.PackerBuildName),
-			KeyPairName:          b.config.SSHKeyPairName,
-			PrivateKeyFile:       b.config.RunConfig.Comm.SSHPrivateKey,
-			TemporaryKeyPairName: b.config.TemporaryKeyPairName,
+			Debug:        b.config.PackerDebug,
+			Comm:         &b.config.RunConfig.Comm,
+			DebugKeyPath: fmt.Sprintf("ec2_%s.pem", b.config.PackerBuildName),
 		},
 		&awscommon.StepSecurityGroup{
-			CommConfig:       &b.config.RunConfig.Comm,
-			SecurityGroupIds: b.config.SecurityGroupIds,
-			VpcId:            b.config.VpcId,
+			CommConfig:            &b.config.RunConfig.Comm,
+			SecurityGroupFilter:   b.config.SecurityGroupFilter,
+			SecurityGroupIds:      b.config.SecurityGroupIds,
+			TemporarySGSourceCidr: b.config.TemporarySGSourceCidr,
 		},
-		&awscommon.StepRunSourceInstance{
-			Debug:                    b.config.PackerDebug,
-			SpotPrice:                b.config.SpotPrice,
-			SpotPriceProduct:         b.config.SpotPriceAutoProduct,
-			InstanceType:             b.config.InstanceType,
-			IamInstanceProfile:       b.config.IamInstanceProfile,
-			UserData:                 b.config.UserData,
-			UserDataFile:             b.config.UserDataFile,
-			SourceAMI:                b.config.SourceAmi,
-			SubnetId:                 b.config.SubnetId,
-			AssociatePublicIpAddress: b.config.AssociatePublicIpAddress,
-			AvailabilityZone:         b.config.AvailabilityZone,
-			BlockDevices:             b.config.BlockDevices,
-			Tags:                     b.config.RunTags,
-		},
+		instanceStep,
 		&awscommon.StepGetPassword{
-			Debug:   b.config.PackerDebug,
-			Comm:    &b.config.RunConfig.Comm,
-			Timeout: b.config.WindowsPasswordTimeout,
+			Debug:     b.config.PackerDebug,
+			Comm:      &b.config.RunConfig.Comm,
+			Timeout:   b.config.WindowsPasswordTimeout,
+			BuildName: b.config.PackerBuildName,
 		},
 		&communicator.StepConnect{
 			Config: &b.config.RunConfig.Comm,
 			Host: awscommon.SSHHost(
 				ec2conn,
-				b.config.SSHPrivateIp),
-			SSHConfig: awscommon.SSHConfig(
-				b.config.RunConfig.Comm.SSHUsername),
+				b.config.Comm.SSHInterface),
+			SSHConfig: b.config.RunConfig.Comm.SSHConfigFunc(),
 		},
 		&common.StepProvision{},
+		&common.StepCleanupTempKeys{
+			Comm: &b.config.RunConfig.Comm,
+		},
 		&StepUploadX509Cert{},
 		&StepBundleVolume{
 			Debug: b.config.PackerDebug,
@@ -227,36 +284,41 @@ func (b *Builder) Run(ui packer.Ui, hook packer.Hook, cache packer.Cache) (packe
 			Debug: b.config.PackerDebug,
 		},
 		&awscommon.StepDeregisterAMI{
-			ForceDeregister: b.config.AMIForceDeregister,
-			AMIName:         b.config.AMIName,
+			AccessConfig:        &b.config.AccessConfig,
+			ForceDeregister:     b.config.AMIForceDeregister,
+			ForceDeleteSnapshot: b.config.AMIForceDeleteSnapshot,
+			AMIName:             b.config.AMIName,
+			Regions:             b.config.AMIRegions,
 		},
-		&StepRegisterAMI{},
+		&StepRegisterAMI{
+			EnableAMISriovNetSupport: b.config.AMISriovNetSupport,
+			EnableAMIENASupport:      b.config.AMIENASupport,
+		},
 		&awscommon.StepAMIRegionCopy{
-			AccessConfig: &b.config.AccessConfig,
-			Regions:      b.config.AMIRegions,
-			Name:         b.config.AMIName,
+			AccessConfig:      &b.config.AccessConfig,
+			Regions:           b.config.AMIRegions,
+			RegionKeyIds:      b.config.AMIRegionKMSKeyIDs,
+			EncryptBootVolume: b.config.AMIEncryptBootVolume,
+			Name:              b.config.AMIName,
 		},
 		&awscommon.StepModifyAMIAttributes{
-			Description:  b.config.AMIDescription,
-			Users:        b.config.AMIUsers,
-			Groups:       b.config.AMIGroups,
-			ProductCodes: b.config.AMIProductCodes,
+			Description:    b.config.AMIDescription,
+			Users:          b.config.AMIUsers,
+			Groups:         b.config.AMIGroups,
+			ProductCodes:   b.config.AMIProductCodes,
+			SnapshotUsers:  b.config.SnapshotUsers,
+			SnapshotGroups: b.config.SnapshotGroups,
+			Ctx:            b.config.ctx,
 		},
 		&awscommon.StepCreateTags{
-			Tags: b.config.AMITags,
+			Tags:         b.config.AMITags,
+			SnapshotTags: b.config.SnapshotTags,
+			Ctx:          b.config.ctx,
 		},
 	}
 
 	// Run!
-	if b.config.PackerDebug {
-		b.runner = &multistep.DebugRunner{
-			Steps:   steps,
-			PauseFn: common.MultistepDebugFn(ui),
-		}
-	} else {
-		b.runner = &multistep.BasicRunner{Steps: steps}
-	}
-
+	b.runner = common.NewRunner(steps, b.config.PackerConfig, ui)
 	b.runner.Run(state)
 
 	// If there was an error, return that
@@ -273,7 +335,7 @@ func (b *Builder) Run(ui packer.Ui, hook packer.Hook, cache packer.Cache) (packe
 	artifact := &awscommon.Artifact{
 		Amis:           state.Get("amis").(map[string]string),
 		BuilderIdValue: BuilderId,
-		Conn:           ec2conn,
+		Session:        session,
 	}
 
 	return artifact, nil

@@ -1,23 +1,23 @@
 package googlecompute
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"time"
 
-	"github.com/mitchellh/multistep"
-	"github.com/mitchellh/packer/packer"
+	"github.com/hashicorp/packer/helper/multistep"
+	"github.com/hashicorp/packer/packer"
 )
 
 // stepInstanceInfo represents a Packer build step that gathers GCE instance info.
 type StepInstanceInfo struct {
 	Debug bool
-
-	info int
 }
 
 // Run executes the Packer build step that gathers GCE instance info.
-func (s *StepInstanceInfo) Run(state multistep.StateBag) multistep.StepAction {
+// This adds "instance_ip" to the multistep state.
+func (s *StepInstanceInfo) Run(_ context.Context, state multistep.StateBag) multistep.StepAction {
 	config := state.Get("config").(*Config)
 	driver := state.Get("driver").(Driver)
 	ui := state.Get("ui").(packer.Ui)

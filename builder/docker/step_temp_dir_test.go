@@ -1,16 +1,18 @@
 package docker
 
 import (
-	"github.com/mitchellh/multistep"
+	"context"
 	"os"
 	"testing"
+
+	"github.com/hashicorp/packer/helper/multistep"
 )
 
 func TestStepTempDir_impl(t *testing.T) {
 	var _ multistep.Step = new(StepTempDir)
 }
 
-func TestStepTempDir(t *testing.T) {
+func testStepTempDir_impl(t *testing.T) string {
 	state := testState(t)
 	step := new(StepTempDir)
 	defer step.Cleanup(state)
@@ -21,7 +23,7 @@ func TestStepTempDir(t *testing.T) {
 	}
 
 	// run the step
-	if action := step.Run(state); action != multistep.ActionContinue {
+	if action := step.Run(context.Background(), state); action != multistep.ActionContinue {
 		t.Fatalf("bad action: %#v", action)
 	}
 
@@ -41,4 +43,10 @@ func TestStepTempDir(t *testing.T) {
 	if _, err := os.Stat(dir); err == nil {
 		t.Fatalf("dir should be gone")
 	}
+
+	return dir
+}
+
+func TestStepTempDir(t *testing.T) {
+	testStepTempDir_impl(t)
 }

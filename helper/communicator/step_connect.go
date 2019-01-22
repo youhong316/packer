@@ -1,10 +1,13 @@
 package communicator
 
 import (
+	"context"
 	"fmt"
 	"log"
 
-	"github.com/mitchellh/multistep"
+	"github.com/hashicorp/packer/communicator/none"
+	"github.com/hashicorp/packer/helper/multistep"
+	"github.com/hashicorp/packer/packer"
 	gossh "golang.org/x/crypto/ssh"
 )
 
@@ -31,6 +34,7 @@ type StepConnect struct {
 	// WinRMConfig should return the default configuration for
 	// connecting via WinRM.
 	WinRMConfig func(multistep.StateBag) (*WinRMConfig, error)
+	WinRMPort   func(multistep.StateBag) (int, error)
 
 	// CustomConnect can be set to have custom connectors for specific
 	// types. These take highest precedence so you can also override
@@ -40,7 +44,9 @@ type StepConnect struct {
 	substep multistep.Step
 }
 
-func (s *StepConnect) Run(state multistep.StateBag) multistep.StepAction {
+func (s *StepConnect) Run(ctx context.Context, state multistep.StateBag) multistep.StepAction {
+	ui := state.Get("ui").(packer.Ui)
+
 	typeMap := map[string]multistep.Step{
 		"none": nil,
 		"ssh": &StepConnectSSH{
@@ -53,7 +59,7 @@ func (s *StepConnect) Run(state multistep.StateBag) multistep.StepAction {
 			Config:      s.Config,
 			Host:        s.Host,
 			WinRMConfig: s.WinRMConfig,
-			WinRMPort:   s.SSHPort,
+			WinRMPort:   s.WinRMPort,
 		},
 	}
 	for k, v := range s.CustomConnect {
@@ -67,12 +73,28 @@ func (s *StepConnect) Run(state multistep.StateBag) multistep.StepAction {
 	}
 
 	if step == nil {
-		log.Printf("[INFO] communicator disabled, will not connect")
+		if comm, err := none.New("none"); err != nil {
+			err := fmt.Errorf("Failed to set communicator 'none': %s", err)
+			state.Put("error", err)
+			ui.Error(err.Error())
+			return multistep.ActionHalt
+
+		} else {
+			state.Put("communicator", comm)
+			log.Printf("[INFO] communicator disabled, will not connect")
+		}
 		return multistep.ActionContinue
 	}
 
+	if host, err := s.Host(state); err == nil {
+		ui.Say(fmt.Sprintf("Using %s communicator to connect: %s", s.Config.Type, host))
+
+	} else {
+		log.Printf("[DEBUG] Unable to get address during connection step: %s", err)
+	}
+
 	s.substep = step
-	return s.substep.Run(state)
+	return s.substep.Run(ctx, state)
 }
 
 func (s *StepConnect) Cleanup(state multistep.StateBag) {

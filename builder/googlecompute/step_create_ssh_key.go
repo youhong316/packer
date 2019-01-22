@@ -1,6 +1,7 @@
 package googlecompute
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
@@ -8,8 +9,8 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/mitchellh/multistep"
-	"github.com/mitchellh/packer/packer"
+	"github.com/hashicorp/packer/helper/multistep"
+	"github.com/hashicorp/packer/packer"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -20,8 +21,24 @@ type StepCreateSSHKey struct {
 }
 
 // Run executes the Packer build step that generates SSH key pairs.
-func (s *StepCreateSSHKey) Run(state multistep.StateBag) multistep.StepAction {
+// The key pairs are added to the ssh config
+func (s *StepCreateSSHKey) Run(_ context.Context, state multistep.StateBag) multistep.StepAction {
 	ui := state.Get("ui").(packer.Ui)
+	config := state.Get("config").(*Config)
+
+	if config.Comm.SSHPrivateKeyFile != "" {
+		ui.Say("Using existing SSH private key")
+		privateKeyBytes, err := config.Comm.ReadSSHPrivateKeyFile()
+		if err != nil {
+			state.Put("error", err)
+			return multistep.ActionHalt
+		}
+
+		config.Comm.SSHPrivateKey = privateKeyBytes
+		config.Comm.SSHPublicKey = nil
+
+		return multistep.ActionContinue
+	}
 
 	ui.Say("Creating temporary SSH key for instance...")
 	priv, err := rsa.GenerateKey(rand.Reader, 2048)
@@ -45,8 +62,8 @@ func (s *StepCreateSSHKey) Run(state multistep.StateBag) multistep.StepAction {
 		ui.Error(err.Error())
 		return multistep.ActionHalt
 	}
-	state.Put("ssh_private_key", string(pem.EncodeToMemory(&priv_blk)))
-	state.Put("ssh_public_key", string(ssh.MarshalAuthorizedKey(pub)))
+	config.Comm.SSHPrivateKey = pem.EncodeToMemory(&priv_blk)
+	config.Comm.SSHPublicKey = ssh.MarshalAuthorizedKey(pub)
 
 	if s.Debug {
 		ui.Message(fmt.Sprintf("Saving key for debug purposes: %s", s.DebugKeyPath))

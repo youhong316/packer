@@ -8,24 +8,27 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"strings"
 	"time"
 
-	"github.com/mitchellh/multistep"
-	"github.com/mitchellh/packer/common"
-	"github.com/mitchellh/packer/helper/communicator"
-	"github.com/mitchellh/packer/helper/config"
-	"github.com/mitchellh/packer/packer"
-	"github.com/mitchellh/packer/template/interpolate"
+	"github.com/hashicorp/packer/common"
+	"github.com/hashicorp/packer/common/bootcommand"
+	"github.com/hashicorp/packer/helper/communicator"
+	"github.com/hashicorp/packer/helper/config"
+	"github.com/hashicorp/packer/helper/multistep"
+	"github.com/hashicorp/packer/packer"
+	"github.com/hashicorp/packer/template/interpolate"
 )
 
 const BuilderId = "transcend.qemu"
 
 var accels = map[string]struct{}{
-	"none": struct{}{},
-	"kvm":  struct{}{},
-	"tcg":  struct{}{},
-	"xen":  struct{}{},
+	"none": {},
+	"kvm":  {},
+	"tcg":  {},
+	"xen":  {},
+	"hax":  {},
+	"hvf":  {},
+	"whpx": {},
 }
 
 var netDevice = map[string]bool{
@@ -54,9 +57,10 @@ var netDevice = map[string]bool{
 }
 
 var diskInterface = map[string]bool{
-	"ide":    true,
-	"scsi":   true,
-	"virtio": true,
+	"ide":         true,
+	"scsi":        true,
+	"virtio":      true,
+	"virtio-scsi": true,
 }
 
 var diskCache = map[string]bool{
@@ -72,56 +76,61 @@ var diskDiscard = map[string]bool{
 	"ignore": true,
 }
 
+var diskDZeroes = map[string]bool{
+	"unmap": true,
+	"on":    true,
+	"off":   true,
+}
+
 type Builder struct {
 	config Config
 	runner multistep.Runner
 }
 
 type Config struct {
-	common.PackerConfig `mapstructure:",squash"`
-	Comm                communicator.Config `mapstructure:",squash"`
+	common.PackerConfig   `mapstructure:",squash"`
+	common.HTTPConfig     `mapstructure:",squash"`
+	common.ISOConfig      `mapstructure:",squash"`
+	bootcommand.VNCConfig `mapstructure:",squash"`
+	Comm                  communicator.Config `mapstructure:",squash"`
+	common.FloppyConfig   `mapstructure:",squash"`
 
-	Accelerator     string     `mapstructure:"accelerator"`
-	BootCommand     []string   `mapstructure:"boot_command"`
-	DiskInterface   string     `mapstructure:"disk_interface"`
-	DiskSize        uint       `mapstructure:"disk_size"`
-	DiskCache       string     `mapstructure:"disk_cache"`
-	DiskDiscard     string     `mapstructure:"disk_discard"`
-	FloppyFiles     []string   `mapstructure:"floppy_files"`
-	Format          string     `mapstructure:"format"`
-	Headless        bool       `mapstructure:"headless"`
-	DiskImage       bool       `mapstructure:"disk_image"`
-	HTTPDir         string     `mapstructure:"http_directory"`
-	HTTPPortMin     uint       `mapstructure:"http_port_min"`
-	HTTPPortMax     uint       `mapstructure:"http_port_max"`
-	ISOChecksum     string     `mapstructure:"iso_checksum"`
-	ISOChecksumType string     `mapstructure:"iso_checksum_type"`
-	ISOUrls         []string   `mapstructure:"iso_urls"`
-	MachineType     string     `mapstructure:"machine_type"`
-	NetDevice       string     `mapstructure:"net_device"`
-	OutputDir       string     `mapstructure:"output_directory"`
-	QemuArgs        [][]string `mapstructure:"qemuargs"`
-	QemuBinary      string     `mapstructure:"qemu_binary"`
-	ShutdownCommand string     `mapstructure:"shutdown_command"`
-	SSHHostPortMin  uint       `mapstructure:"ssh_host_port_min"`
-	SSHHostPortMax  uint       `mapstructure:"ssh_host_port_max"`
-	VNCPortMin      uint       `mapstructure:"vnc_port_min"`
-	VNCPortMax      uint       `mapstructure:"vnc_port_max"`
-	VMName          string     `mapstructure:"vm_name"`
+	ISOSkipCache      bool       `mapstructure:"iso_skip_cache"`
+	Accelerator       string     `mapstructure:"accelerator"`
+	DiskInterface     string     `mapstructure:"disk_interface"`
+	DiskSize          uint       `mapstructure:"disk_size"`
+	DiskCache         string     `mapstructure:"disk_cache"`
+	DiskDiscard       string     `mapstructure:"disk_discard"`
+	DetectZeroes      string     `mapstructure:"disk_detect_zeroes"`
+	SkipCompaction    bool       `mapstructure:"skip_compaction"`
+	DiskCompression   bool       `mapstructure:"disk_compression"`
+	Format            string     `mapstructure:"format"`
+	Headless          bool       `mapstructure:"headless"`
+	DiskImage         bool       `mapstructure:"disk_image"`
+	UseBackingFile    bool       `mapstructure:"use_backing_file"`
+	MachineType       string     `mapstructure:"machine_type"`
+	NetDevice         string     `mapstructure:"net_device"`
+	OutputDir         string     `mapstructure:"output_directory"`
+	QemuArgs          [][]string `mapstructure:"qemuargs"`
+	QemuBinary        string     `mapstructure:"qemu_binary"`
+	ShutdownCommand   string     `mapstructure:"shutdown_command"`
+	SSHHostPortMin    uint       `mapstructure:"ssh_host_port_min"`
+	SSHHostPortMax    uint       `mapstructure:"ssh_host_port_max"`
+	UseDefaultDisplay bool       `mapstructure:"use_default_display"`
+	VNCBindAddress    string     `mapstructure:"vnc_bind_address"`
+	VNCPortMin        uint       `mapstructure:"vnc_port_min"`
+	VNCPortMax        uint       `mapstructure:"vnc_port_max"`
+	VMName            string     `mapstructure:"vm_name"`
 
 	// These are deprecated, but we keep them around for BC
 	// TODO(@mitchellh): remove
-	SSHKeyPath     string        `mapstructure:"ssh_key_path"`
 	SSHWaitTimeout time.Duration `mapstructure:"ssh_wait_timeout"`
 
 	// TODO(mitchellh): deprecate
 	RunOnce bool `mapstructure:"run_once"`
 
-	RawBootWait        string `mapstructure:"boot_wait"`
-	RawSingleISOUrl    string `mapstructure:"iso_url"`
 	RawShutdownTimeout string `mapstructure:"shutdown_timeout"`
 
-	bootWait        time.Duration ``
 	shutdownTimeout time.Duration ``
 	ctx             interpolate.Context
 }
@@ -141,8 +150,11 @@ func (b *Builder) Prepare(raws ...interface{}) ([]string, error) {
 		return nil, err
 	}
 
+	var errs *packer.MultiError
+	warnings := make([]string, 0)
+
 	if b.config.DiskSize == 0 {
-		b.config.DiskSize = 40000
+		b.config.DiskSize = 40960
 	}
 
 	if b.config.DiskCache == "" {
@@ -153,20 +165,28 @@ func (b *Builder) Prepare(raws ...interface{}) ([]string, error) {
 		b.config.DiskDiscard = "ignore"
 	}
 
+	if b.config.DetectZeroes == "" {
+		b.config.DetectZeroes = "off"
+	}
+
 	if b.config.Accelerator == "" {
 		if runtime.GOOS == "windows" {
 			b.config.Accelerator = "tcg"
 		} else {
-			b.config.Accelerator = "kvm"
+			// /dev/kvm is a kernel module that may be loaded if kvm is
+			// installed and the host supports VT-x extensions. To make sure
+			// this will actually work we need to os.Open() it. If os.Open fails
+			// the kernel module was not installed or loaded correctly.
+			if fp, err := os.Open("/dev/kvm"); err != nil {
+				b.config.Accelerator = "tcg"
+			} else {
+				fp.Close()
+				b.config.Accelerator = "kvm"
+			}
 		}
-	}
-
-	if b.config.HTTPPortMin == 0 {
-		b.config.HTTPPortMin = 8000
-	}
-
-	if b.config.HTTPPortMax == 0 {
-		b.config.HTTPPortMax = 9000
+		log.Printf("use detected accelerator: %s", b.config.Accelerator)
+	} else {
+		log.Printf("use specified accelerator: %s", b.config.Accelerator)
 	}
 
 	if b.config.MachineType == "" {
@@ -181,16 +201,16 @@ func (b *Builder) Prepare(raws ...interface{}) ([]string, error) {
 		b.config.QemuBinary = "qemu-system-x86_64"
 	}
 
-	if b.config.RawBootWait == "" {
-		b.config.RawBootWait = "10s"
-	}
-
 	if b.config.SSHHostPortMin == 0 {
 		b.config.SSHHostPortMin = 2222
 	}
 
 	if b.config.SSHHostPortMax == 0 {
 		b.config.SSHHostPortMax = 4444
+	}
+
+	if b.config.VNCBindAddress == "" {
+		b.config.VNCBindAddress = "127.0.0.1"
 	}
 
 	if b.config.VNCPortMin == 0 {
@@ -209,9 +229,8 @@ func (b *Builder) Prepare(raws ...interface{}) ([]string, error) {
 		b.config.Format = "qcow2"
 	}
 
-	if b.config.FloppyFiles == nil {
-		b.config.FloppyFiles = make([]string, 0)
-	}
+	errs = packer.MultiErrorAppend(errs, b.config.FloppyConfig.Prepare(&b.config.ctx)...)
+	errs = packer.MultiErrorAppend(errs, b.config.VNCConfig.Prepare(&b.config.ctx)...)
 
 	if b.config.NetDevice == "" {
 		b.config.NetDevice = "virtio-net"
@@ -222,16 +241,19 @@ func (b *Builder) Prepare(raws ...interface{}) ([]string, error) {
 	}
 
 	// TODO: backwards compatibility, write fixer instead
-	if b.config.SSHKeyPath != "" {
-		b.config.Comm.SSHPrivateKey = b.config.SSHKeyPath
-	}
 	if b.config.SSHWaitTimeout != 0 {
 		b.config.Comm.SSHTimeout = b.config.SSHWaitTimeout
 	}
 
-	var errs *packer.MultiError
-	warnings := make([]string, 0)
+	if b.config.ISOSkipCache {
+		b.config.ISOChecksumType = "none"
+	}
 
+	isoWarnings, isoErrs := b.config.ISOConfig.Prepare(&b.config.ctx)
+	warnings = append(warnings, isoWarnings...)
+	errs = packer.MultiErrorAppend(errs, isoErrs...)
+
+	errs = packer.MultiErrorAppend(errs, b.config.HTTPConfig.Prepare(&b.config.ctx)...)
 	if es := b.config.Comm.Prepare(&b.config.ctx); len(es) > 0 {
 		errs = packer.MultiErrorAppend(errs, es...)
 	}
@@ -241,9 +263,19 @@ func (b *Builder) Prepare(raws ...interface{}) ([]string, error) {
 			errs, errors.New("invalid format, only 'qcow2' or 'raw' are allowed"))
 	}
 
+	if b.config.Format != "qcow2" {
+		b.config.SkipCompaction = true
+		b.config.DiskCompression = false
+	}
+
+	if b.config.UseBackingFile && !(b.config.DiskImage && b.config.Format == "qcow2") {
+		errs = packer.MultiErrorAppend(
+			errs, errors.New("use_backing_file can only be enabled for QCOW2 images and when disk_image is true"))
+	}
+
 	if _, ok := accels[b.config.Accelerator]; !ok {
 		errs = packer.MultiErrorAppend(
-			errs, errors.New("invalid accelerator, only 'kvm', 'tcg', 'xen', or 'none' are allowed"))
+			errs, errors.New("invalid accelerator, only 'kvm', 'tcg', 'xen', 'hax', 'hvf', 'whpx', or 'none' are allowed"))
 	}
 
 	if _, ok := netDevice[b.config.NetDevice]; !ok {
@@ -263,51 +295,12 @@ func (b *Builder) Prepare(raws ...interface{}) ([]string, error) {
 
 	if _, ok := diskDiscard[b.config.DiskDiscard]; !ok {
 		errs = packer.MultiErrorAppend(
-			errs, errors.New("unrecognized disk cache type"))
+			errs, errors.New("unrecognized disk discard type"))
 	}
 
-	if b.config.HTTPPortMin > b.config.HTTPPortMax {
+	if _, ok := diskDZeroes[b.config.DetectZeroes]; !ok {
 		errs = packer.MultiErrorAppend(
-			errs, errors.New("http_port_min must be less than http_port_max"))
-	}
-
-	if b.config.ISOChecksumType == "" {
-		errs = packer.MultiErrorAppend(
-			errs, errors.New("The iso_checksum_type must be specified."))
-	} else {
-		b.config.ISOChecksumType = strings.ToLower(b.config.ISOChecksumType)
-		if b.config.ISOChecksumType != "none" {
-			if b.config.ISOChecksum == "" {
-				errs = packer.MultiErrorAppend(
-					errs, errors.New("Due to large file sizes, an iso_checksum is required"))
-			} else {
-				b.config.ISOChecksum = strings.ToLower(b.config.ISOChecksum)
-			}
-
-			if h := common.HashForType(b.config.ISOChecksumType); h == nil {
-				errs = packer.MultiErrorAppend(
-					errs,
-					fmt.Errorf("Unsupported checksum type: %s", b.config.ISOChecksumType))
-			}
-		}
-	}
-
-	if b.config.RawSingleISOUrl == "" && len(b.config.ISOUrls) == 0 {
-		errs = packer.MultiErrorAppend(
-			errs, errors.New("One of iso_url or iso_urls must be specified."))
-	} else if b.config.RawSingleISOUrl != "" && len(b.config.ISOUrls) > 0 {
-		errs = packer.MultiErrorAppend(
-			errs, errors.New("Only one of iso_url or iso_urls may be specified."))
-	} else if b.config.RawSingleISOUrl != "" {
-		b.config.ISOUrls = []string{b.config.RawSingleISOUrl}
-	}
-
-	for i, url := range b.config.ISOUrls {
-		b.config.ISOUrls[i], err = common.DownloadableURL(url)
-		if err != nil {
-			errs = packer.MultiErrorAppend(
-				errs, fmt.Errorf("Failed to parse iso_url %d: %s", i+1, err))
-		}
+			errs, errors.New("unrecognized disk detect zeroes setting"))
 	}
 
 	if !b.config.PackerForce {
@@ -316,12 +309,6 @@ func (b *Builder) Prepare(raws ...interface{}) ([]string, error) {
 				errs,
 				fmt.Errorf("Output directory '%s' already exists. It must not exist.", b.config.OutputDir))
 		}
-	}
-
-	b.config.bootWait, err = time.ParseDuration(b.config.RawBootWait)
-	if err != nil {
-		errs = packer.MultiErrorAppend(
-			errs, fmt.Errorf("Failed parsing boot_wait: %s", err))
 	}
 
 	if b.config.RawShutdownTimeout == "" {
@@ -348,12 +335,6 @@ func (b *Builder) Prepare(raws ...interface{}) ([]string, error) {
 		b.config.QemuArgs = make([][]string, 0)
 	}
 
-	if b.config.ISOChecksumType == "none" {
-		warnings = append(warnings,
-			"A checksum type of 'none' was specified. Since ISO files are so big,\n"+
-				"a checksum is highly recommended.")
-	}
-
 	if errs != nil && len(errs.Errors) > 0 {
 		return warnings, errs
 	}
@@ -377,55 +358,93 @@ func (b *Builder) Run(ui packer.Ui, hook packer.Hook, cache packer.Cache) (packe
 		steprun.Message = "Starting VM, booting disk image"
 	}
 
-	steps := []multistep.Step{
-		&common.StepDownload{
+	steps := []multistep.Step{}
+	if !b.config.ISOSkipCache {
+		steps = append(steps, &common.StepDownload{
 			Checksum:     b.config.ISOChecksum,
 			ChecksumType: b.config.ISOChecksumType,
 			Description:  "ISO",
+			Extension:    b.config.TargetExtension,
 			ResultKey:    "iso_path",
+			TargetPath:   b.config.TargetPath,
 			Url:          b.config.ISOUrls,
 		},
-		new(stepPrepareOutputDir),
+		)
+	} else {
+		steps = append(steps, &stepSetISO{
+			ResultKey: "iso_path",
+			Url:       b.config.ISOUrls,
+		},
+		)
+	}
+
+	steps = append(steps, new(stepPrepareOutputDir),
 		&common.StepCreateFloppy{
-			Files: b.config.FloppyFiles,
+			Files:       b.config.FloppyConfig.FloppyFiles,
+			Directories: b.config.FloppyConfig.FloppyDirectories,
 		},
 		new(stepCreateDisk),
 		new(stepCopyDisk),
 		new(stepResizeDisk),
-		new(stepHTTPServer),
-		new(stepForwardSSH),
+		&common.StepHTTPServer{
+			HTTPDir:     b.config.HTTPDir,
+			HTTPPortMin: b.config.HTTPPortMin,
+			HTTPPortMax: b.config.HTTPPortMax,
+		},
+	)
+
+	if b.config.Comm.Type != "none" {
+		steps = append(steps,
+			new(stepForwardSSH),
+		)
+	}
+
+	steps = append(steps,
 		new(stepConfigureVNC),
 		steprun,
-		&stepBootWait{},
 		&stepTypeBootCommand{},
-		&communicator.StepConnect{
-			Config:    &b.config.Comm,
-			Host:      commHost,
-			SSHConfig: sshConfig,
-			SSHPort:   commPort,
-		},
-		new(common.StepProvision),
-		new(stepShutdown),
+	)
+
+	if b.config.Comm.Type != "none" {
+		steps = append(steps,
+			&communicator.StepConnect{
+				Config:    &b.config.Comm,
+				Host:      commHost,
+				SSHConfig: b.config.Comm.SSHConfigFunc(),
+				SSHPort:   commPort,
+				WinRMPort: commPort,
+			},
+		)
 	}
+
+	steps = append(steps,
+		new(common.StepProvision),
+	)
+
+	steps = append(steps,
+		&common.StepCleanupTempKeys{
+			Comm: &b.config.Comm,
+		},
+	)
+	steps = append(steps,
+		new(stepShutdown),
+	)
+
+	steps = append(steps,
+		new(stepConvertDisk),
+	)
 
 	// Setup the state bag
 	state := new(multistep.BasicStateBag)
 	state.Put("cache", cache)
 	state.Put("config", &b.config)
+	state.Put("debug", b.config.PackerDebug)
 	state.Put("driver", driver)
 	state.Put("hook", hook)
 	state.Put("ui", ui)
 
 	// Run
-	if b.config.PackerDebug {
-		b.runner = &multistep.DebugRunner{
-			Steps:   steps,
-			PauseFn: common.MultistepDebugFn(ui),
-		}
-	} else {
-		b.runner = &multistep.BasicRunner{Steps: steps}
-	}
-
+	b.runner = common.NewRunnerWithPauseFn(steps, b.config.PackerConfig, ui, state)
 	b.runner.Run(state)
 
 	// If there was an error, return that
@@ -445,11 +464,14 @@ func (b *Builder) Run(ui packer.Ui, hook packer.Hook, cache packer.Cache) (packe
 	// Compile the artifact list
 	files := make([]string, 0, 5)
 	visit := func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
 		if !info.IsDir() {
 			files = append(files, path)
 		}
 
-		return err
+		return nil
 	}
 
 	if err := filepath.Walk(b.config.OutputDir, visit); err != nil {

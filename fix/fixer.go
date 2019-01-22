@@ -20,13 +20,25 @@ var FixerOrder []string
 
 func init() {
 	Fixers = map[string]Fixer{
-		"iso-md5":             new(FixerISOMD5),
-		"createtime":          new(FixerCreateTime),
-		"pp-vagrant-override": new(FixerVagrantPPOverride),
-		"virtualbox-gaattach": new(FixerVirtualBoxGAAttach),
-		"virtualbox-rename":   new(FixerVirtualBoxRename),
-		"vmware-rename":       new(FixerVMwareRename),
-		"parallels-headless":  new(FixerParallelsHeadless),
+		"iso-md5":                    new(FixerISOMD5),
+		"createtime":                 new(FixerCreateTime),
+		"pp-vagrant-override":        new(FixerVagrantPPOverride),
+		"virtualbox-gaattach":        new(FixerVirtualBoxGAAttach),
+		"virtualbox-rename":          new(FixerVirtualBoxRename),
+		"vmware-rename":              new(FixerVMwareRename),
+		"parallels-headless":         new(FixerParallelsHeadless),
+		"parallels-deprecations":     new(FixerParallelsDeprecations),
+		"sshkeypath":                 new(FixerSSHKeyPath),
+		"sshdisableagent":            new(FixerSSHDisableAgent),
+		"manifest-filename":          new(FixerManifestFilename),
+		"amazon-shutdown_behavior":   new(FixerAmazonShutdownBehavior),
+		"amazon-enhanced-networking": new(FixerAmazonEnhancedNetworking),
+		"amazon-private-ip":          new(FixerAmazonPrivateIP),
+		"docker-email":               new(FixerDockerEmail),
+		"powershell-escapes":         new(FixerPowerShellEscapes),
+		"hyperv-deprecations":        new(FixerHypervDeprecations),
+		"hyperv-vmxc-typo":           new(FixerHypervVmxcTypo),
+		"vmware-compaction":          new(FixerVMwareCompaction),
 	}
 
 	FixerOrder = []string{
@@ -37,5 +49,15 @@ func init() {
 		"virtualbox-rename",
 		"vmware-rename",
 		"parallels-headless",
+		"parallels-deprecations",
+		"sshkeypath",
+		"sshdisableagent",
+		"manifest-filename",
+		"amazon-shutdown_behavior",
+		"amazon-enhanced-networking",
+		"amazon-private-ip",
+		"docker-email",
+		"powershell-escapes",
+		"vmware-compaction",
 	}
 }

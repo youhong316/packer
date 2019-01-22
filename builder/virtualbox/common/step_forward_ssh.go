@@ -1,14 +1,15 @@
 package common
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"math/rand"
 	"net"
 
-	"github.com/mitchellh/multistep"
-	"github.com/mitchellh/packer/helper/communicator"
-	"github.com/mitchellh/packer/packer"
+	"github.com/hashicorp/packer/helper/communicator"
+	"github.com/hashicorp/packer/helper/multistep"
+	"github.com/hashicorp/packer/packer"
 )
 
 // This step adds a NAT port forwarding definition so that SSH is available
@@ -27,30 +28,28 @@ type StepForwardSSH struct {
 	SkipNatMapping bool
 }
 
-func (s *StepForwardSSH) Run(state multistep.StateBag) multistep.StepAction {
+func (s *StepForwardSSH) Run(_ context.Context, state multistep.StateBag) multistep.StepAction {
 	driver := state.Get("driver").(Driver)
 	ui := state.Get("ui").(packer.Ui)
 	vmName := state.Get("vmName").(string)
 
+	if s.CommConfig.Type == "none" {
+		log.Printf("Not using a communicator, skipping setting up port forwarding...")
+		state.Put("sshHostPort", 0)
+		return multistep.ActionContinue
+	}
+
 	guestPort := s.CommConfig.Port()
 	sshHostPort := guestPort
 	if !s.SkipNatMapping {
-		log.Printf("Looking for available SSH port between %d and %d",
+		log.Printf("Looking for available communicator (SSH, WinRM, etc) port between %d and %d",
 			s.HostPortMin, s.HostPortMax)
-		offset := 0
 
-		portRange := int(s.HostPortMax - s.HostPortMin)
-		if portRange > 0 {
-			// Have to check if > 0 to avoid a panic
-			offset = rand.Intn(portRange)
-		}
+		portRange := int(s.HostPortMax - s.HostPortMin + 1)
+		offset := rand.Intn(portRange)
 
 		for {
 			sshHostPort = offset + int(s.HostPortMin)
-			if sshHostPort >= int(s.HostPortMax) {
-				offset = 0
-				sshHostPort = int(s.HostPortMin)
-			}
 			log.Printf("Trying port: %d", sshHostPort)
 			l, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", sshHostPort))
 			if err == nil {
@@ -58,14 +57,17 @@ func (s *StepForwardSSH) Run(state multistep.StateBag) multistep.StepAction {
 				break
 			}
 			offset++
+			if offset == portRange {
+				offset = 0
+			}
 		}
 
 		// Create a forwarded port mapping to the VM
-		ui.Say(fmt.Sprintf("Creating forwarded port mapping for SSH (host port %d)", sshHostPort))
+		ui.Say(fmt.Sprintf("Creating forwarded port mapping for communicator (SSH, WinRM, etc) (host port %d)", sshHostPort))
 		command := []string{
 			"modifyvm", vmName,
 			"--natpf1",
-			fmt.Sprintf("packerssh,tcp,127.0.0.1,%d,,%d", sshHostPort, guestPort),
+			fmt.Sprintf("packercomm,tcp,127.0.0.1,%d,,%d", sshHostPort, guestPort),
 		}
 		if err := driver.VBoxManage(command...); err != nil {
 			err := fmt.Errorf("Error creating port forwarding rule: %s", err)

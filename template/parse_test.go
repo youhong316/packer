@@ -1,3 +1,5 @@
+// +build !windows
+
 package template
 
 import (
@@ -21,7 +23,7 @@ func TestParse(t *testing.T) {
 			"parse-basic.json",
 			&Template{
 				Builders: map[string]*Builder{
-					"something": &Builder{
+					"something": {
 						Name: "something",
 						Type: "something",
 					},
@@ -47,7 +49,7 @@ func TestParse(t *testing.T) {
 			"parse-provisioner-basic.json",
 			&Template{
 				Provisioners: []*Provisioner{
-					&Provisioner{
+					{
 						Type: "something",
 					},
 				},
@@ -59,7 +61,7 @@ func TestParse(t *testing.T) {
 			"parse-provisioner-pause-before.json",
 			&Template{
 				Provisioners: []*Provisioner{
-					&Provisioner{
+					{
 						Type:        "something",
 						PauseBefore: 1 * time.Second,
 					},
@@ -72,7 +74,7 @@ func TestParse(t *testing.T) {
 			"parse-provisioner-only.json",
 			&Template{
 				Provisioners: []*Provisioner{
-					&Provisioner{
+					{
 						Type: "something",
 						OnlyExcept: OnlyExcept{
 							Only: []string{"foo"},
@@ -87,7 +89,7 @@ func TestParse(t *testing.T) {
 			"parse-provisioner-except.json",
 			&Template{
 				Provisioners: []*Provisioner{
-					&Provisioner{
+					{
 						Type: "something",
 						OnlyExcept: OnlyExcept{
 							Except: []string{"foo"},
@@ -102,7 +104,7 @@ func TestParse(t *testing.T) {
 			"parse-provisioner-override.json",
 			&Template{
 				Provisioners: []*Provisioner{
-					&Provisioner{
+					{
 						Type: "something",
 						Override: map[string]interface{}{
 							"foo": map[string]interface{}{},
@@ -123,7 +125,7 @@ func TestParse(t *testing.T) {
 			"parse-variable-default.json",
 			&Template{
 				Variables: map[string]*Variable{
-					"foo": &Variable{
+					"foo": {
 						Default: "foo",
 					},
 				},
@@ -135,7 +137,7 @@ func TestParse(t *testing.T) {
 			"parse-variable-required.json",
 			&Template{
 				Variables: map[string]*Variable{
-					"foo": &Variable{
+					"foo": {
 						Required: true,
 					},
 				},
@@ -147,8 +149,8 @@ func TestParse(t *testing.T) {
 			"parse-pp-basic.json",
 			&Template{
 				PostProcessors: [][]*PostProcessor{
-					[]*PostProcessor{
-						&PostProcessor{
+					{
+						{
 							Type: "foo",
 							Config: map[string]interface{}{
 								"foo": "bar",
@@ -164,8 +166,8 @@ func TestParse(t *testing.T) {
 			"parse-pp-keep.json",
 			&Template{
 				PostProcessors: [][]*PostProcessor{
-					[]*PostProcessor{
-						&PostProcessor{
+					{
+						{
 							Type:              "foo",
 							KeepInputArtifact: true,
 						},
@@ -179,8 +181,8 @@ func TestParse(t *testing.T) {
 			"parse-pp-only.json",
 			&Template{
 				PostProcessors: [][]*PostProcessor{
-					[]*PostProcessor{
-						&PostProcessor{
+					{
+						{
 							Type: "foo",
 							OnlyExcept: OnlyExcept{
 								Only: []string{"bar"},
@@ -196,8 +198,8 @@ func TestParse(t *testing.T) {
 			"parse-pp-except.json",
 			&Template{
 				PostProcessors: [][]*PostProcessor{
-					[]*PostProcessor{
-						&PostProcessor{
+					{
+						{
 							Type: "foo",
 							OnlyExcept: OnlyExcept{
 								Except: []string{"bar"},
@@ -213,8 +215,8 @@ func TestParse(t *testing.T) {
 			"parse-pp-string.json",
 			&Template{
 				PostProcessors: [][]*PostProcessor{
-					[]*PostProcessor{
-						&PostProcessor{
+					{
+						{
 							Type: "foo",
 						},
 					},
@@ -227,8 +229,8 @@ func TestParse(t *testing.T) {
 			"parse-pp-map.json",
 			&Template{
 				PostProcessors: [][]*PostProcessor{
-					[]*PostProcessor{
-						&PostProcessor{
+					{
+						{
 							Type: "foo",
 						},
 					},
@@ -241,13 +243,13 @@ func TestParse(t *testing.T) {
 			"parse-pp-slice.json",
 			&Template{
 				PostProcessors: [][]*PostProcessor{
-					[]*PostProcessor{
-						&PostProcessor{
+					{
+						{
 							Type: "foo",
 						},
 					},
-					[]*PostProcessor{
-						&PostProcessor{
+					{
+						{
 							Type: "bar",
 						},
 					},
@@ -260,11 +262,11 @@ func TestParse(t *testing.T) {
 			"parse-pp-multi.json",
 			&Template{
 				PostProcessors: [][]*PostProcessor{
-					[]*PostProcessor{
-						&PostProcessor{
+					{
+						{
 							Type: "foo",
 						},
-						&PostProcessor{
+						{
 							Type: "bar",
 						},
 					},
@@ -309,7 +311,7 @@ func TestParse(t *testing.T) {
 			"parse-comment.json",
 			&Template{
 				Builders: map[string]*Builder{
-					"something": &Builder{
+					"something": {
 						Name: "something",
 						Type: "something",
 					},
@@ -348,5 +350,26 @@ func TestParse_contents(t *testing.T) {
 	expected := `{"builders":[{"type":"test"}]}`
 	if actual != expected {
 		t.Fatalf("bad: %s\n\n%s", actual, expected)
+	}
+}
+
+func TestParse_bad(t *testing.T) {
+	cases := []struct {
+		File     string
+		Expected string
+	}{
+		{"error-beginning.json", "line 1, column 1 (offset 1)"},
+		{"error-middle.json", "line 5, column 6 (offset 50)"},
+		{"error-end.json", "line 1, column 30 (offset 30)"},
+		{"malformed.json", "line 16, column 3 (offset 433)"},
+	}
+	for _, tc := range cases {
+		_, err := ParseFile(fixtureDir(tc.File))
+		if err == nil {
+			t.Fatalf("expected error")
+		}
+		if !strings.Contains(err.Error(), tc.Expected) {
+			t.Fatalf("file: %s\nExpected: %s\n%s\n", tc.File, tc.Expected, err.Error())
+		}
 	}
 }

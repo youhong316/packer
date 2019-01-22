@@ -1,8 +1,11 @@
 package main
 
 import (
+	"bufio"
+	"fmt"
 	"io"
 	"os"
+	"strings"
 )
 
 // These are the environmental variables that determine if we log, and if
@@ -13,7 +16,7 @@ const EnvLogFile = "PACKER_LOG_PATH" //Set to a file
 // logOutput determines where we should send logs (if anywhere).
 func logOutput() (logOutput io.Writer, err error) {
 	logOutput = nil
-	if os.Getenv(EnvLog) != "" {
+	if os.Getenv(EnvLog) != "" && os.Getenv(EnvLog) != "0" {
 		logOutput = os.Stderr
 
 		if logPath := os.Getenv(EnvLogFile); logPath != "" {
@@ -22,6 +25,20 @@ func logOutput() (logOutput io.Writer, err error) {
 			if err != nil {
 				return nil, err
 			}
+		} else {
+			// no path; do a little light filtering to avoid double-dipping UI
+			// calls.
+			r, w := io.Pipe()
+			scanner := bufio.NewScanner(r)
+			go func(scanner *bufio.Scanner) {
+				for scanner.Scan() {
+					if strings.Contains(scanner.Text(), "ui:") {
+						continue
+					}
+					os.Stderr.WriteString(fmt.Sprint(scanner.Text() + "\n"))
+				}
+			}(scanner)
+			logOutput = w
 		}
 	}
 

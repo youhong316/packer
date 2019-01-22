@@ -9,22 +9,30 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 
-	"github.com/mitchellh/packer/packer"
-	"github.com/mitchellh/packer/template"
+	"github.com/hashicorp/packer/helper/enumflag"
+	"github.com/hashicorp/packer/packer"
+	"github.com/hashicorp/packer/template"
+
+	"github.com/posener/complete"
 )
 
 type BuildCommand struct {
 	Meta
 }
 
-func (c BuildCommand) Run(args []string) int {
-	var cfgColor, cfgDebug, cfgForce, cfgParallel bool
+func (c *BuildCommand) Run(args []string) int {
+	var cfgColor, cfgDebug, cfgForce, cfgTimestamp, cfgParallel bool
+	var cfgOnError string
 	flags := c.Meta.FlagSet("build", FlagSetBuildFilter|FlagSetVars)
 	flags.Usage = func() { c.Ui.Say(c.Help()) }
 	flags.BoolVar(&cfgColor, "color", true, "")
 	flags.BoolVar(&cfgDebug, "debug", false, "")
 	flags.BoolVar(&cfgForce, "force", false, "")
+	flags.BoolVar(&cfgTimestamp, "timestamp-ui", false, "")
+	flagOnError := enumflag.New(&cfgOnError, "cleanup", "abort", "ask")
+	flags.Var(flagOnError, "on-error", "")
 	flags.BoolVar(&cfgParallel, "parallel", true, "")
 	if err := flags.Parse(args); err != nil {
 		return 1
@@ -39,11 +47,7 @@ func (c BuildCommand) Run(args []string) int {
 	// Parse the template
 	var tpl *template.Template
 	var err error
-	if args[0] == "-" {
-		tpl, err = template.Parse(os.Stdin)
-	} else {
-		tpl, err = template.ParseFile(args[0])
-	}
+	tpl, err = template.ParseFile(args[0])
 	if err != nil {
 		c.Ui.Error(fmt.Sprintf("Failed to parse template: %s", err))
 		return 1
@@ -92,23 +96,34 @@ func (c BuildCommand) Run(args []string) int {
 				Color: colors[i%len(colors)],
 				Ui:    ui,
 			}
+			if _, ok := c.Ui.(*packer.MachineReadableUi); !ok {
+				ui.Say(fmt.Sprintf("%s output will be in this color.", b))
+				if i+1 == len(buildNames) {
+					// Add a newline between the color output and the actual output
+					c.Ui.Say("")
+				}
+				// Now add timestamps if requested
+				if cfgTimestamp {
+					ui = &packer.TimestampedUi{
+						Ui: ui,
+					}
+				}
+			}
 		}
 
 		buildUis[b] = ui
-		ui.Say(fmt.Sprintf("%s output will be in this color.", b))
 	}
-
-	// Add a newline between the color output and the actual output
-	c.Ui.Say("")
 
 	log.Printf("Build debug mode: %v", cfgDebug)
 	log.Printf("Force build: %v", cfgForce)
+	log.Printf("On error: %v", cfgOnError)
 
 	// Set the debug and force mode and prepare all the builds
 	for _, b := range builds {
 		log.Printf("Preparing build: %s", b.Name())
 		b.SetDebug(cfgDebug)
 		b.SetForce(cfgForce)
+		b.SetOnError(cfgOnError)
 
 		warnings, err := b.Prepare()
 		if err != nil {
@@ -128,15 +143,20 @@ func (c BuildCommand) Run(args []string) int {
 	// Run all the builds in parallel and wait for them to complete
 	var interruptWg, wg sync.WaitGroup
 	interrupted := false
-	artifacts := make(map[string][]packer.Artifact)
+	var artifacts = struct {
+		sync.RWMutex
+		m map[string][]packer.Artifact
+	}{m: make(map[string][]packer.Artifact)}
 	errors := make(map[string]error)
+	// ctx := context.Background()
 	for _, b := range builds {
 		// Increment the waitgroup so we wait for this item to finish properly
 		wg.Add(1)
+		// buildCtx, cancelCtx := ctx.WithCancel()
 
 		// Handle interrupts for this build
 		sigCh := make(chan os.Signal, 1)
-		signal.Notify(sigCh, os.Interrupt)
+		signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
 		defer signal.Stop(sigCh)
 		go func(b packer.Build) {
 			<-sigCh
@@ -146,6 +166,7 @@ func (c BuildCommand) Run(args []string) int {
 
 			log.Printf("Stopping build: %s", b.Name())
 			b.Cancel()
+			//cancelCtx()
 			log.Printf("Build cancelled: %s", b.Name())
 		}(b)
 
@@ -163,7 +184,9 @@ func (c BuildCommand) Run(args []string) int {
 				errors[name] = err
 			} else {
 				ui.Say(fmt.Sprintf("Build '%s' finished.", name))
-				artifacts[name] = runArtifacts
+				artifacts.Lock()
+				artifacts.m[name] = runArtifacts
+				artifacts.Unlock()
 			}
 		}(b)
 
@@ -201,8 +224,8 @@ func (c BuildCommand) Run(args []string) int {
 
 		c.Ui.Error("\n==> Some builds didn't complete successfully and had errors:")
 		for name, err := range errors {
-			// Create a UI for the machine readable stuff to be targetted
-			ui := &packer.TargettedUi{
+			// Create a UI for the machine readable stuff to be targeted
+			ui := &packer.TargetedUI{
 				Target: name,
 				Ui:     c.Ui,
 			}
@@ -213,11 +236,11 @@ func (c BuildCommand) Run(args []string) int {
 		}
 	}
 
-	if len(artifacts) > 0 {
+	if len(artifacts.m) > 0 {
 		c.Ui.Say("\n==> Builds finished. The artifacts of successful builds are:")
-		for name, buildArtifacts := range artifacts {
-			// Create a UI for the machine readable stuff to be targetted
-			ui := &packer.TargettedUi{
+		for name, buildArtifacts := range artifacts.m {
+			// Create a UI for the machine readable stuff to be targeted
+			ui := &packer.TargetedUI{
 				Target: name,
 				Ui:     c.Ui,
 			}
@@ -230,7 +253,7 @@ func (c BuildCommand) Run(args []string) int {
 				fmt.Fprintf(&message, "--> %s: ", name)
 
 				if artifact != nil {
-					fmt.Fprintf(&message, artifact.String())
+					fmt.Fprint(&message, artifact.String())
 				} else {
 					fmt.Fprint(&message, "<nothing>")
 				}
@@ -269,7 +292,7 @@ func (c BuildCommand) Run(args []string) int {
 	return 0
 }
 
-func (BuildCommand) Help() string {
+func (*BuildCommand) Help() string {
 	helpText := `
 Usage: packer build [options] TEMPLATE
 
@@ -278,19 +301,42 @@ Usage: packer build [options] TEMPLATE
 
 Options:
 
-  -debug                     Debug mode enabled for builds
-  -force                     Force a build to continue if artifacts exist, deletes existing artifacts
-  -machine-readable          Machine-readable output
-  -except=foo,bar,baz        Build all builds other than these
-  -only=foo,bar,baz          Only build the given builds by name
-  -parallel=false            Disable parallelization (on by default)
-  -var 'key=value'           Variable for templates, can be used multiple times.
-  -var-file=path             JSON file containing user variables.
+  -color=false                  Disable color output. (Default: color)
+  -debug                        Debug mode enabled for builds.
+  -except=foo,bar,baz           Build all builds other than these.
+  -only=foo,bar,baz             Build only the specified builds.
+  -force                        Force a build to continue if artifacts exist, deletes existing artifacts.
+  -machine-readable             Produce machine-readable output.
+  -on-error=[cleanup|abort|ask] If the build fails do: clean up (default), abort, or ask.
+  -parallel=false               Disable parallelization. (Default: parallel)
+  -timestamp-ui                 Enable prefixing of each ui output with an RFC3339 timestamp.
+  -var 'key=value'              Variable for templates, can be used multiple times.
+  -var-file=path                JSON file containing user variables.
 `
 
 	return strings.TrimSpace(helpText)
 }
 
-func (BuildCommand) Synopsis() string {
+func (*BuildCommand) Synopsis() string {
 	return "build image(s) from template"
+}
+
+func (*BuildCommand) AutocompleteArgs() complete.Predictor {
+	return complete.PredictNothing
+}
+
+func (*BuildCommand) AutocompleteFlags() complete.Flags {
+	return complete.Flags{
+		"-color":            complete.PredictNothing,
+		"-debug":            complete.PredictNothing,
+		"-except":           complete.PredictNothing,
+		"-only":             complete.PredictNothing,
+		"-force":            complete.PredictNothing,
+		"-machine-readable": complete.PredictNothing,
+		"-on-error":         complete.PredictNothing,
+		"-parallel":         complete.PredictNothing,
+		"-timestamp-ui":     complete.PredictNothing,
+		"-var":              complete.PredictNothing,
+		"-var-file":         complete.PredictNothing,
+	}
 }

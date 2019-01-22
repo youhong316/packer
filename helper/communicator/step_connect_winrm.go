@@ -1,14 +1,19 @@
 package communicator
 
 import (
+	"bytes"
+	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log"
+	"strings"
 	"time"
 
-	"github.com/mitchellh/multistep"
-	"github.com/mitchellh/packer/communicator/winrm"
-	"github.com/mitchellh/packer/packer"
+	"github.com/hashicorp/packer/communicator/winrm"
+	"github.com/hashicorp/packer/helper/multistep"
+	"github.com/hashicorp/packer/packer"
+	winrmcmd "github.com/masterzen/winrm"
 )
 
 // StepConnectWinRM is a multistep Step implementation that waits for WinRM
@@ -28,7 +33,7 @@ type StepConnectWinRM struct {
 	WinRMPort   func(multistep.StateBag) (int, error)
 }
 
-func (s *StepConnectWinRM) Run(state multistep.StateBag) multistep.StepAction {
+func (s *StepConnectWinRM) Run(_ context.Context, state multistep.StateBag) multistep.StepAction {
 	ui := state.Get("ui").(packer.Ui)
 
 	var comm packer.Communicator
@@ -96,6 +101,7 @@ func (s *StepConnectWinRM) waitForWinRM(state multistep.StateBag, cancel <-chan 
 			log.Printf("[DEBUG] Error getting WinRM host: %s", err)
 			continue
 		}
+
 		port := s.Config.WinRMPort
 		if s.WinRMPort != nil {
 			port, err = s.WinRMPort(state)
@@ -124,17 +130,53 @@ func (s *StepConnectWinRM) waitForWinRM(state multistep.StateBag, cancel <-chan 
 
 		log.Println("[INFO] Attempting WinRM connection...")
 		comm, err = winrm.New(&winrm.Config{
-			Host:     host,
-			Port:     port,
-			Username: user,
-			Password: password,
-			Timeout:  s.Config.WinRMTimeout,
+			Host:               host,
+			Port:               port,
+			Username:           user,
+			Password:           password,
+			Timeout:            s.Config.WinRMTimeout,
+			Https:              s.Config.WinRMUseSSL,
+			Insecure:           s.Config.WinRMInsecure,
+			TransportDecorator: s.Config.WinRMTransportDecorator,
 		})
 		if err != nil {
 			log.Printf("[ERROR] WinRM connection err: %s", err)
 			continue
 		}
 
+		break
+	}
+	// run an "echo" command to make sure winrm is actually connected before moving on.
+	var connectCheckCommand = winrmcmd.Powershell(`if (Test-Path variable:global:ProgressPreference){$ProgressPreference='SilentlyContinue'}; echo "WinRM connected."`)
+	var retryableSleep = 5 * time.Second
+	// run an "echo" command to make sure that the winrm is connected
+	for {
+		cmd := &packer.RemoteCmd{Command: connectCheckCommand}
+		var buf, buf2 bytes.Buffer
+		cmd.Stdout = &buf
+		cmd.Stdout = io.MultiWriter(cmd.Stdout, &buf2)
+		select {
+		case <-cancel:
+			log.Println("WinRM wait canceled, exiting loop")
+			return comm, fmt.Errorf("WinRM wait canceled")
+		case <-time.After(retryableSleep):
+		}
+
+		log.Printf("Checking that WinRM is connected with: '%s'", connectCheckCommand)
+		ui := state.Get("ui").(packer.Ui)
+		err := cmd.StartWithUi(comm, ui)
+
+		if err != nil {
+			log.Printf("Communication connection err: %s", err)
+			continue
+		}
+
+		log.Printf("Connected to machine")
+		stdoutToRead := buf2.String()
+		if !strings.Contains(stdoutToRead, "WinRM connected.") {
+			log.Printf("echo didn't succeed; retrying...")
+			continue
+		}
 		break
 	}
 

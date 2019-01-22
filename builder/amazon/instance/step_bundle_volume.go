@@ -1,12 +1,13 @@
 package instance
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/aws/aws-sdk-go/service/ec2"
-	"github.com/mitchellh/multistep"
-	"github.com/mitchellh/packer/packer"
-	"github.com/mitchellh/packer/template/interpolate"
+	"github.com/hashicorp/packer/helper/multistep"
+	"github.com/hashicorp/packer/packer"
+	"github.com/hashicorp/packer/template/interpolate"
 )
 
 type bundleCmdData struct {
@@ -23,7 +24,7 @@ type StepBundleVolume struct {
 	Debug bool
 }
 
-func (s *StepBundleVolume) Run(state multistep.StateBag) multistep.StepAction {
+func (s *StepBundleVolume) Run(_ context.Context, state multistep.StateBag) multistep.StepAction {
 	comm := state.Get("communicator").(packer.Communicator)
 	config := state.Get("config").(*Config)
 	instance := state.Get("instance").(*ec2.Instance)
@@ -67,7 +68,9 @@ func (s *StepBundleVolume) Run(state multistep.StateBag) multistep.StepAction {
 	if cmd.ExitStatus != 0 {
 		state.Put("error", fmt.Errorf(
 			"Volume bundling failed. Please see the output above for more\n"+
-				"details on what went wrong."))
+				"details on what went wrong.\n\n"+
+				"One common cause for this error is ec2-bundle-vol not being\n"+
+				"available on the target instance."))
 		ui.Error(state.Get("error").(error).Error())
 		return multistep.ActionHalt
 	}

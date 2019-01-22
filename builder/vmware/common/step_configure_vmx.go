@@ -1,14 +1,14 @@
 package common
 
 import (
+	"context"
 	"fmt"
-	"io/ioutil"
 	"log"
 	"regexp"
 	"strings"
 
-	"github.com/mitchellh/multistep"
-	"github.com/mitchellh/packer/packer"
+	"github.com/hashicorp/packer/helper/multistep"
+	"github.com/hashicorp/packer/packer"
 )
 
 // This step configures a VMX by setting some default settings as well
@@ -16,24 +16,30 @@ import (
 //
 // Uses:
 //   vmx_path string
+//
+// Produces:
+//   display_name string - Value of the displayName key set in the VMX file
 type StepConfigureVMX struct {
-	CustomData map[string]string
-	SkipFloppy bool
+	CustomData  map[string]string
+	DisplayName string
+	SkipFloppy  bool
+	VMName      string
 }
 
-func (s *StepConfigureVMX) Run(state multistep.StateBag) multistep.StepAction {
-	ui := state.Get("ui").(packer.Ui)
-	vmxPath := state.Get("vmx_path").(string)
+func (s *StepConfigureVMX) Run(_ context.Context, state multistep.StateBag) multistep.StepAction {
+	log.Printf("Configuring VMX...\n")
 
-	vmxContents, err := ioutil.ReadFile(vmxPath)
+	var err error
+	ui := state.Get("ui").(packer.Ui)
+
+	vmxPath := state.Get("vmx_path").(string)
+	vmxData, err := ReadVMX(vmxPath)
 	if err != nil {
 		err := fmt.Errorf("Error reading VMX file: %s", err)
 		state.Put("error", err)
 		ui.Error(err.Error())
 		return multistep.ActionHalt
 	}
-
-	vmxData := ParseVMX(string(vmxContents))
 
 	// Set this so that no dialogs ever appear from Packer.
 	vmxData["msg.autoanswer"] = "true"
@@ -44,7 +50,7 @@ func (s *StepConfigureVMX) Run(state multistep.StateBag) multistep.StepAction {
 	// Delete any generated addresses since we want to regenerate
 	// them. Conflicting MAC addresses is a bad time.
 	addrRegex := regexp.MustCompile(`(?i)^ethernet\d+\.generatedAddress`)
-	for k, _ := range vmxData {
+	for k := range vmxData {
 		if addrRegex.MatchString(k) {
 			delete(vmxData, k)
 		}
@@ -59,16 +65,46 @@ func (s *StepConfigureVMX) Run(state multistep.StateBag) multistep.StepAction {
 
 	// Set a floppy disk, but only if we should
 	if !s.SkipFloppy {
+		// Grab list of temporary builder devices so we can append the floppy to it
+		tmpBuildDevices := state.Get("temporaryDevices").([]string)
+
 		// Set a floppy disk if we have one
 		if floppyPathRaw, ok := state.GetOk("floppy_path"); ok {
 			log.Println("Floppy path present, setting in VMX")
 			vmxData["floppy0.present"] = "TRUE"
 			vmxData["floppy0.filetype"] = "file"
 			vmxData["floppy0.filename"] = floppyPathRaw.(string)
+
+			// Add it to our list of build devices to later remove
+			tmpBuildDevices = append(tmpBuildDevices, "floppy0")
+		}
+
+		// Build the list back in our statebag
+		state.Put("temporaryDevices", tmpBuildDevices)
+	}
+
+	// If the build is taking place on a remote ESX server, the displayName
+	// will be needed for discovery of the VM's IP address and for export
+	// of the VM. The displayName key should always be set in the VMX file,
+	// so error if we don't find it and the user has not set it in the config.
+	if s.DisplayName != "" {
+		vmxData["displayname"] = s.DisplayName
+		state.Put("display_name", s.DisplayName)
+	} else {
+		displayName, ok := vmxData["displayname"]
+		if !ok { // Packer converts key names to lowercase!
+			err := fmt.Errorf("Error: Could not get value of displayName from VMX data")
+			state.Put("error", err)
+			ui.Error(err.Error())
+			return multistep.ActionHalt
+		} else {
+			state.Put("display_name", displayName)
 		}
 	}
 
-	if err := WriteVMX(vmxPath, vmxData); err != nil {
+	err = WriteVMX(vmxPath, vmxData)
+
+	if err != nil {
 		err := fmt.Errorf("Error writing VMX file: %s", err)
 		state.Put("error", err)
 		ui.Error(err.Error())

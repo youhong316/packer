@@ -1,41 +1,62 @@
 package common
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/service/ec2"
-	"github.com/mitchellh/multistep"
-	"github.com/mitchellh/packer/packer"
+	"github.com/hashicorp/packer/helper/multistep"
+	"github.com/hashicorp/packer/packer"
 )
 
 type StepDeregisterAMI struct {
-	ForceDeregister bool
-	AMIName         string
+	AccessConfig        *AccessConfig
+	ForceDeregister     bool
+	ForceDeleteSnapshot bool
+	AMIName             string
+	Regions             []string
 }
 
-func (s *StepDeregisterAMI) Run(state multistep.StateBag) multistep.StepAction {
-	ec2conn := state.Get("ec2").(*ec2.EC2)
-	ui := state.Get("ui").(packer.Ui)
+func (s *StepDeregisterAMI) Run(_ context.Context, state multistep.StateBag) multistep.StepAction {
+	// Check for force deregister
+	if !s.ForceDeregister {
+		return multistep.ActionContinue
+	}
 
-	// check for force deregister
-	if s.ForceDeregister {
-		resp, err := ec2conn.DescribeImages(&ec2.DescribeImagesInput{
-			Filters: []*ec2.Filter{&ec2.Filter{
+	ui := state.Get("ui").(packer.Ui)
+	ec2conn := state.Get("ec2").(*ec2.EC2)
+	// Add the session region to list of regions will will deregister AMIs in
+	regions := append(s.Regions, *ec2conn.Config.Region)
+
+	for _, region := range regions {
+		// get new connection for each region in which we need to deregister vms
+		session, err := s.AccessConfig.Session()
+		if err != nil {
+			return multistep.ActionHalt
+		}
+
+		regionconn := ec2.New(session.Copy(&aws.Config{
+			Region: aws.String(region)},
+		))
+
+		resp, err := regionconn.DescribeImages(&ec2.DescribeImagesInput{
+			Owners: aws.StringSlice([]string{"self"}),
+			Filters: []*ec2.Filter{{
 				Name:   aws.String("name"),
-				Values: []*string{aws.String(s.AMIName)},
+				Values: aws.StringSlice([]string{s.AMIName}),
 			}}})
 
 		if err != nil {
-			err := fmt.Errorf("Error creating AMI: %s", err)
+			err := fmt.Errorf("Error describing AMI: %s", err)
 			state.Put("error", err)
 			ui.Error(err.Error())
 			return multistep.ActionHalt
 		}
 
-		// deregister image(s) by that name
+		// Deregister image(s) by name
 		for _, i := range resp.Images {
-			_, err := ec2conn.DeregisterImage(&ec2.DeregisterImageInput{
+			_, err := regionconn.DeregisterImage(&ec2.DeregisterImageInput{
 				ImageId: i.ImageId,
 			})
 
@@ -46,6 +67,25 @@ func (s *StepDeregisterAMI) Run(state multistep.StateBag) multistep.StepAction {
 				return multistep.ActionHalt
 			}
 			ui.Say(fmt.Sprintf("Deregistered AMI %s, id: %s", s.AMIName, *i.ImageId))
+
+			// Delete snapshot(s) by image
+			if s.ForceDeleteSnapshot {
+				for _, b := range i.BlockDeviceMappings {
+					if b.Ebs != nil && aws.StringValue(b.Ebs.SnapshotId) != "" {
+						_, err := regionconn.DeleteSnapshot(&ec2.DeleteSnapshotInput{
+							SnapshotId: b.Ebs.SnapshotId,
+						})
+
+						if err != nil {
+							err := fmt.Errorf("Error deleting existing snapshot: %s", err)
+							state.Put("error", err)
+							ui.Error(err.Error())
+							return multistep.ActionHalt
+						}
+						ui.Say(fmt.Sprintf("Deleted snapshot: %s", *b.Ebs.SnapshotId))
+					}
+				}
+			}
 		}
 	}
 

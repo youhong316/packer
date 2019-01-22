@@ -4,8 +4,11 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/hashicorp/packer/version"
 )
 
 func TestFuncBuildName(t *testing.T) {
@@ -133,7 +136,7 @@ func TestFuncIsotime(t *testing.T) {
 
 	currentTime := time.Now().UTC()
 	if currentTime.Sub(val) > 2*time.Second {
-		t.Fatalf("val: %d (current: %d)", val, currentTime)
+		t.Fatalf("val: %v (current: %v)", val, currentTime)
 	}
 }
 
@@ -197,6 +200,43 @@ func TestFuncTemplatePath(t *testing.T) {
 	}
 }
 
+func TestFuncSplit(t *testing.T) {
+	cases := []struct {
+		Input         string
+		Output        string
+		ErrorExpected bool
+	}{
+		{
+			`{{split build_name "-" 0}}`,
+			"foo",
+			false,
+		},
+		{
+			`{{split build_name "-" 1}}`,
+			"bar",
+			false,
+		},
+		{
+			`{{split build_name "-" 2}}`,
+			"",
+			true,
+		},
+	}
+
+	ctx := &Context{BuildName: "foo-bar"}
+	for _, tc := range cases {
+		i := &I{Value: tc.Input}
+		result, err := i.Render(ctx)
+		if (err == nil) == tc.ErrorExpected {
+			t.Fatalf("Input: %s\n\nerr: %s", tc.Input, err)
+		}
+
+		if result != tc.Output {
+			t.Fatalf("Input: %s\n\nGot: %s", tc.Input, result)
+		}
+	}
+}
+
 func TestFuncTimestamp(t *testing.T) {
 	expected := strconv.FormatInt(InitTime.Unix(), 10)
 
@@ -237,6 +277,63 @@ func TestFuncUser(t *testing.T) {
 		{
 			`{{user "what"}}`,
 			``,
+		},
+	}
+
+	ctx := &Context{
+		UserVariables: map[string]string{
+			"foo": "foo",
+		},
+	}
+	for _, tc := range cases {
+		i := &I{Value: tc.Input}
+		result, err := i.Render(ctx)
+		if err != nil {
+			t.Fatalf("Input: %s\n\nerr: %s", tc.Input, err)
+		}
+
+		if result != tc.Output {
+			t.Fatalf("Input: %s\n\nGot: %s", tc.Input, result)
+		}
+	}
+}
+
+func TestFuncPackerVersion(t *testing.T) {
+	template := `{{packer_version}}`
+
+	ctx := &Context{}
+	i := &I{Value: template}
+
+	result, err := i.Render(ctx)
+	if err != nil {
+		t.Fatalf("Input: %s\n\nerr: %s", template, err)
+	}
+
+	// Only match the X.Y.Z portion of the whole version string.
+	if !strings.HasPrefix(result, version.Version) {
+		t.Fatalf("Expected input to include: %s\n\nGot: %s",
+			version.Version, result)
+	}
+}
+
+func TestFuncSed(t *testing.T) {
+	cases := []struct {
+		Input  string
+		Output string
+	}{
+		{
+			`{{sed "s|hello|world|" "hello"}}`,
+			`world`,
+		},
+
+		{
+			`{{sed "s|foo|bar|" "hello"}}`,
+			`hello`,
+		},
+
+		{
+			`{{user "foo" | sed "s|foo|bar|"}}`,
+			`bar`,
 		},
 	}
 

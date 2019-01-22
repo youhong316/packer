@@ -1,11 +1,14 @@
 package iso
 
 import (
+	"context"
 	"fmt"
-	"github.com/mitchellh/multistep"
-	vboxcommon "github.com/mitchellh/packer/builder/virtualbox/common"
-	"github.com/mitchellh/packer/packer"
-	"time"
+	"strconv"
+	"strings"
+
+	vboxcommon "github.com/hashicorp/packer/builder/virtualbox/common"
+	"github.com/hashicorp/packer/helper/multistep"
+	"github.com/hashicorp/packer/packer"
 )
 
 // This step creates the actual virtual machine.
@@ -16,14 +19,14 @@ type stepCreateVM struct {
 	vmName string
 }
 
-func (s *stepCreateVM) Run(state multistep.StateBag) multistep.StepAction {
+func (s *stepCreateVM) Run(_ context.Context, state multistep.StateBag) multistep.StepAction {
 	config := state.Get("config").(*Config)
 	driver := state.Get("driver").(vboxcommon.Driver)
 	ui := state.Get("ui").(packer.Ui)
 
 	name := config.VMName
 
-	commands := make([][]string, 4)
+	commands := make([][]string, 6)
 	commands[0] = []string{
 		"createvm", "--name", name,
 		"--ostype", config.GuestOSType, "--register",
@@ -32,8 +35,15 @@ func (s *stepCreateVM) Run(state multistep.StateBag) multistep.StepAction {
 		"modifyvm", name,
 		"--boot1", "disk", "--boot2", "dvd", "--boot3", "none", "--boot4", "none",
 	}
-	commands[2] = []string{"modifyvm", name, "--cpus", "1"}
-	commands[3] = []string{"modifyvm", name, "--memory", "512"}
+	commands[2] = []string{"modifyvm", name, "--cpus", strconv.Itoa(config.HWConfig.CpuCount)}
+	commands[3] = []string{"modifyvm", name, "--memory", strconv.Itoa(config.HWConfig.MemorySize)}
+	commands[4] = []string{"modifyvm", name, "--usb", map[bool]string{true: "on", false: "off"}[config.HWConfig.USB]}
+
+	if strings.ToLower(config.HWConfig.Sound) == "none" {
+		commands[5] = []string{"modifyvm", name, "--audio", config.HWConfig.Sound}
+	} else {
+		commands[5] = []string{"modifyvm", name, "--audio", config.HWConfig.Sound, "--audioin", "on", "--audioout", "on"}
+	}
 
 	ui.Say("Creating virtual machine...")
 	for _, command := range commands {
@@ -64,19 +74,17 @@ func (s *stepCreateVM) Cleanup(state multistep.StateBag) {
 
 	driver := state.Get("driver").(vboxcommon.Driver)
 	ui := state.Get("ui").(packer.Ui)
+	config := state.Get("config").(*Config)
 
-	ui.Say("Unregistering and deleting virtual machine...")
-	var err error = nil
-	for i := 0; i < 5; i++ {
-		err = driver.VBoxManage("unregistervm", s.vmName, "--delete")
-		if err == nil {
-			break
-		}
-
-		time.Sleep(1 * time.Second * time.Duration(i))
+	_, cancelled := state.GetOk(multistep.StateCancelled)
+	_, halted := state.GetOk(multistep.StateHalted)
+	if (config.KeepRegistered) && (!cancelled && !halted) {
+		ui.Say("Keeping virtual machine registered with VirtualBox host (keep_registered = true)")
+		return
 	}
 
-	if err != nil {
-		ui.Error(fmt.Sprintf("Error deleting virtual machine: %s", err))
+	ui.Say("Deregistering and deleting VM...")
+	if err := driver.Delete(s.vmName); err != nil {
+		ui.Error(fmt.Sprintf("Error deleting VM: %s", err))
 	}
 }

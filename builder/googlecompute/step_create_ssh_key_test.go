@@ -1,7 +1,9 @@
 package googlecompute
 
 import (
-	"github.com/mitchellh/multistep"
+	"context"
+
+	"github.com/hashicorp/packer/helper/multistep"
 
 	"io/ioutil"
 	"os"
@@ -12,21 +14,40 @@ func TestStepCreateSSHKey_impl(t *testing.T) {
 	var _ multistep.Step = new(StepCreateSSHKey)
 }
 
-func TestStepCreateSSHKey(t *testing.T) {
+func TestStepCreateSSHKey_privateKey(t *testing.T) {
 	state := testState(t)
 	step := new(StepCreateSSHKey)
+	cfg := state.Get("config").(*Config)
+	cfg.Comm.SSHPrivateKeyFile = "test-fixtures/fake-key"
 	defer step.Cleanup(state)
 
 	// run the step
-	if action := step.Run(state); action != multistep.ActionContinue {
+	if action := step.Run(context.Background(), state); action != multistep.ActionContinue {
 		t.Fatalf("bad action: %#v", action)
 	}
 
 	// Verify that we have a public/private key
-	if _, ok := state.GetOk("ssh_private_key"); !ok {
+	if len(cfg.Comm.SSHPrivateKey) == 0 {
 		t.Fatal("should have key")
 	}
-	if _, ok := state.GetOk("ssh_public_key"); !ok {
+}
+
+func TestStepCreateSSHKey(t *testing.T) {
+	state := testState(t)
+	step := new(StepCreateSSHKey)
+	cfg := state.Get("config").(*Config)
+	defer step.Cleanup(state)
+
+	// run the step
+	if action := step.Run(context.Background(), state); action != multistep.ActionContinue {
+		t.Fatalf("bad action: %#v", action)
+	}
+
+	// Verify that we have a public/private key
+	if len(cfg.Comm.SSHPrivateKey) == 0 {
+		t.Fatal("should have key")
+	}
+	if len(cfg.Comm.SSHPublicKey) == 0 {
 		t.Fatal("should have key")
 	}
 }
@@ -36,25 +57,27 @@ func TestStepCreateSSHKey_debug(t *testing.T) {
 	if err != nil {
 		t.Fatalf("err: %s", err)
 	}
+	defer os.Remove(tf.Name())
 	tf.Close()
 
 	state := testState(t)
 	step := new(StepCreateSSHKey)
+	cfg := state.Get("config").(*Config)
 	step.Debug = true
 	step.DebugKeyPath = tf.Name()
 
 	defer step.Cleanup(state)
 
 	// run the step
-	if action := step.Run(state); action != multistep.ActionContinue {
+	if action := step.Run(context.Background(), state); action != multistep.ActionContinue {
 		t.Fatalf("bad action: %#v", action)
 	}
 
 	// Verify that we have a public/private key
-	if _, ok := state.GetOk("ssh_private_key"); !ok {
+	if len(cfg.Comm.SSHPrivateKey) == 0 {
 		t.Fatal("should have key")
 	}
-	if _, ok := state.GetOk("ssh_public_key"); !ok {
+	if len(cfg.Comm.SSHPublicKey) == 0 {
 		t.Fatal("should have key")
 	}
 	if _, err := os.Stat(tf.Name()); err != nil {

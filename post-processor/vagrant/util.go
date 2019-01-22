@@ -11,8 +11,8 @@ import (
 	"path/filepath"
 	"runtime"
 
+	"github.com/hashicorp/packer/packer"
 	"github.com/klauspost/pgzip"
-	"github.com/mitchellh/packer/packer"
 )
 
 var (
@@ -32,7 +32,7 @@ func CopyContents(dst, src string) error {
 
 	dstDir, _ := filepath.Split(dst)
 	if dstDir != "" {
-		err := os.MkdirAll(dstDir, os.ModePerm)
+		err := os.MkdirAll(dstDir, 0755)
 		if err != nil {
 			return err
 		}
@@ -45,6 +45,23 @@ func CopyContents(dst, src string) error {
 	defer dstF.Close()
 
 	if _, err := io.Copy(dstF, srcF); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// Creates a (hard) link to a file, ensuring that all parent directories also exist.
+func LinkFile(dst, src string) error {
+	dstDir, _ := filepath.Split(dst)
+	if dstDir != "" {
+		err := os.MkdirAll(dstDir, 0755)
+		if err != nil {
+			return err
+		}
+	}
+
+	if err := os.Link(src, dst); err != nil {
 		return err
 	}
 
@@ -108,6 +125,10 @@ func DirToBox(dst, dir string, ui packer.Ui, level int) error {
 		if err != nil {
 			return err
 		}
+
+		// go >=1.10 wants to use GNU tar format to workaround issues in
+		// libarchive < 3.3.2
+		setHeaderFormat(header)
 
 		// We have to set the Name explicitly because it is supposed to
 		// be a relative path to the root. Otherwise, the tar ends up

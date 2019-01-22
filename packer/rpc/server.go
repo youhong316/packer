@@ -4,13 +4,10 @@ import (
 	"io"
 	"log"
 	"net/rpc"
-	"sync/atomic"
 
-	"github.com/hashicorp/go-msgpack/codec"
-	"github.com/mitchellh/packer/packer"
+	"github.com/hashicorp/packer/packer"
+	"github.com/ugorji/go/codec"
 )
-
-var endpointId uint64
 
 const (
 	DefaultArtifactEndpoint      string = "Artifact"
@@ -117,7 +114,8 @@ func (s *Server) RegisterProvisioner(p packer.Provisioner) {
 
 func (s *Server) RegisterUi(ui packer.Ui) {
 	s.server.RegisterName(DefaultUiEndpoint, &UiServer{
-		ui: ui,
+		ui:       ui,
+		register: s.server.RegisterName,
 	})
 }
 
@@ -139,19 +137,4 @@ func (s *Server) Serve() {
 	}
 	rpcCodec := codec.GoRpc.ServerCodec(stream, h)
 	s.server.ServeCodec(rpcCodec)
-}
-
-// registerComponent registers a single Packer RPC component onto
-// the RPC server. If id is true, then a unique ID number will be appended
-// onto the end of the endpoint.
-//
-// The endpoint name is returned.
-func registerComponent(server *rpc.Server, name string, rcvr interface{}, id bool) string {
-	endpoint := name
-	if id {
-		log.Printf("%s.%d", endpoint, atomic.AddUint64(&endpointId, 1))
-	}
-
-	server.RegisterName(endpoint, rcvr)
-	return endpoint
 }

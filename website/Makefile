@@ -1,17 +1,30 @@
-all: build
+configure_cache:
+	mkdir -p tmp/cache
 
-init:
-	bundle
+build: configure_cache
+	@echo "==> Starting build in Docker..."
+	@docker run \
+		--interactive \
+		--rm \
+		--tty \
+		--volume "$(shell pwd):/opt/buildhome/repo" \
+		--volume "$(shell pwd)/tmp/cache:/opt/buildhome/cache" \
+		--env "ENV=production" \
+		netlify/build \
+		build middleman build --verbose
 
-dev: init
-	PACKER_DISABLE_DOWNLOAD_FETCH=true PACKER_VERSION=1.0 bundle exec middleman server
+website: configure_cache
+	@echo "==> Starting website in Docker..."
+	@docker run \
+		--interactive \
+		--rm \
+		--tty \
+		--volume "$(shell pwd):/opt/buildhome/repo" \
+		--volume "$(shell pwd)/tmp/cache:/opt/buildhome/cache" \
+		--publish "4567:4567" \
+		--publish "35729:35729" \
+		--env "ENV=production" \
+		netlify/build \
+		build middleman
 
-build: init
-	PACKER_DISABLE_DOWNLOAD_FETCH=true PACKER_VERSION=1.0 bundle exec middleman build
-
-format:
-	bundle exec htmlbeautifier -t 2 source/*.erb
-	bundle exec htmlbeautifier -t 2 source/layouts/*.erb
-	@pandoc -v > /dev/null || echo "pandoc must be installed in order to format markdown content"
-	pandoc -v > /dev/null && find . -iname "*.html.markdown" | xargs -I{} bash -c "pandoc -r markdown -w markdown --tab-stop=4 --atx-headers -s --columns=80 {} > {}.new"\; || true
-	pandoc -v > /dev/null && find . -iname "*.html.markdown" | xargs -I{} bash -c "mv {}.new {}"\; || true
+.PHONY: build website

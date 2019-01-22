@@ -1,21 +1,35 @@
+env:
+  - USER=travis
+
+os:
+  - windows
+  - linux
+  - osx
+
 sudo: false
 
 language: go
 
 go:
-  - 1.4
-  - 1.5
-  - tip
+  - 1.11.x
+  - master
+
+before_install:
+  - >
+    if [[ "$TRAVIS_OS_NAME" == "windows" ]];
+    then choco install -y make;
+    fi
 
 script:
-  - GOMAXPROCS=2 make ci
+  - df -h
+  - make ci
 
 branches:
   only:
     - master
 
 matrix:
-  fast_finish: true
   allow_failures:
-    - go: tip
-    - go: 1.5
+    - go: master
+    - os: windows
+  fast_finish: true

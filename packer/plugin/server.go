@@ -10,15 +10,19 @@ package plugin
 import (
 	"errors"
 	"fmt"
-	packrpc "github.com/mitchellh/packer/packer/rpc"
-	"io/ioutil"
 	"log"
+	"math/rand"
 	"net"
 	"os"
 	"os/signal"
 	"runtime"
 	"strconv"
 	"sync/atomic"
+	"syscall"
+	"time"
+
+	packrpc "github.com/hashicorp/packer/packer/rpc"
+	"github.com/hashicorp/packer/packer/tmp"
 )
 
 // This is a count of the number of interrupts the process has received.
@@ -85,7 +89,7 @@ func Server() (*packrpc.Server, error) {
 
 	// Eat the interrupts
 	ch := make(chan os.Signal, 1)
-	signal.Notify(ch, os.Interrupt)
+	signal.Notify(ch, os.Interrupt, syscall.SIGTERM)
 	go func() {
 		var count int32 = 0
 		for {
@@ -121,7 +125,7 @@ func serverListener_tcp(minPort, maxPort int64) (net.Listener, error) {
 }
 
 func serverListener_unix() (net.Listener, error) {
-	tf, err := ioutil.TempFile("", "packer-plugin")
+	tf, err := tmp.File("packer-plugin")
 	if err != nil {
 		return nil, err
 	}
@@ -137,4 +141,9 @@ func serverListener_unix() (net.Listener, error) {
 	}
 
 	return net.Listen("unix", path)
+}
+
+func init() {
+	// Seed the random number generator
+	rand.Seed(time.Now().UTC().UnixNano())
 }

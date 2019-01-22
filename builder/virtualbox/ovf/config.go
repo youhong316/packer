@@ -2,22 +2,24 @@ package ovf
 
 import (
 	"fmt"
-	"os"
 	"strings"
 
-	vboxcommon "github.com/mitchellh/packer/builder/virtualbox/common"
-	"github.com/mitchellh/packer/common"
-	"github.com/mitchellh/packer/helper/config"
-	"github.com/mitchellh/packer/packer"
-	"github.com/mitchellh/packer/template/interpolate"
+	vboxcommon "github.com/hashicorp/packer/builder/virtualbox/common"
+	"github.com/hashicorp/packer/common"
+	"github.com/hashicorp/packer/common/bootcommand"
+	"github.com/hashicorp/packer/helper/config"
+	"github.com/hashicorp/packer/packer"
+	"github.com/hashicorp/packer/template/interpolate"
 )
 
 // Config is the configuration structure for the builder.
 type Config struct {
 	common.PackerConfig             `mapstructure:",squash"`
+	common.HTTPConfig               `mapstructure:",squash"`
+	common.FloppyConfig             `mapstructure:",squash"`
+	bootcommand.BootConfig          `mapstructure:",squash"`
 	vboxcommon.ExportConfig         `mapstructure:",squash"`
 	vboxcommon.ExportOpts           `mapstructure:",squash"`
-	vboxcommon.FloppyConfig         `mapstructure:",squash"`
 	vboxcommon.OutputConfig         `mapstructure:",squash"`
 	vboxcommon.RunConfig            `mapstructure:",squash"`
 	vboxcommon.SSHConfig            `mapstructure:",squash"`
@@ -26,15 +28,19 @@ type Config struct {
 	vboxcommon.VBoxManagePostConfig `mapstructure:",squash"`
 	vboxcommon.VBoxVersionConfig    `mapstructure:",squash"`
 
-	BootCommand          []string `mapstructure:"boot_command"`
-	SourcePath           string   `mapstructure:"source_path"`
+	Checksum             string   `mapstructure:"checksum"`
+	ChecksumType         string   `mapstructure:"checksum_type"`
 	GuestAdditionsMode   string   `mapstructure:"guest_additions_mode"`
 	GuestAdditionsPath   string   `mapstructure:"guest_additions_path"`
-	GuestAdditionsURL    string   `mapstructure:"guest_additions_url"`
 	GuestAdditionsSHA256 string   `mapstructure:"guest_additions_sha256"`
-	VMName               string   `mapstructure:"vm_name"`
-	ImportOpts           string   `mapstructure:"import_opts"`
+	GuestAdditionsURL    string   `mapstructure:"guest_additions_url"`
 	ImportFlags          []string `mapstructure:"import_flags"`
+	ImportOpts           string   `mapstructure:"import_opts"`
+	SourcePath           string   `mapstructure:"source_path"`
+	TargetPath           string   `mapstructure:"target_path"`
+	VMName               string   `mapstructure:"vm_name"`
+	KeepRegistered       bool     `mapstructure:"keep_registered"`
+	SkipExport           bool     `mapstructure:"skip_export"`
 
 	ctx interpolate.Context
 }
@@ -77,6 +83,7 @@ func NewConfig(raws ...interface{}) (*Config, []string, error) {
 	errs = packer.MultiErrorAppend(errs, c.ExportConfig.Prepare(&c.ctx)...)
 	errs = packer.MultiErrorAppend(errs, c.ExportOpts.Prepare(&c.ctx)...)
 	errs = packer.MultiErrorAppend(errs, c.FloppyConfig.Prepare(&c.ctx)...)
+	errs = packer.MultiErrorAppend(errs, c.HTTPConfig.Prepare(&c.ctx)...)
 	errs = packer.MultiErrorAppend(errs, c.OutputConfig.Prepare(&c.ctx, &c.PackerConfig)...)
 	errs = packer.MultiErrorAppend(errs, c.RunConfig.Prepare(&c.ctx)...)
 	errs = packer.MultiErrorAppend(errs, c.ShutdownConfig.Prepare(&c.ctx)...)
@@ -84,14 +91,24 @@ func NewConfig(raws ...interface{}) (*Config, []string, error) {
 	errs = packer.MultiErrorAppend(errs, c.VBoxManageConfig.Prepare(&c.ctx)...)
 	errs = packer.MultiErrorAppend(errs, c.VBoxManagePostConfig.Prepare(&c.ctx)...)
 	errs = packer.MultiErrorAppend(errs, c.VBoxVersionConfig.Prepare(&c.ctx)...)
+	errs = packer.MultiErrorAppend(errs, c.BootConfig.Prepare(&c.ctx)...)
+
+	c.ChecksumType = strings.ToLower(c.ChecksumType)
+	c.Checksum = strings.ToLower(c.Checksum)
 
 	if c.SourcePath == "" {
 		errs = packer.MultiErrorAppend(errs, fmt.Errorf("source_path is required"))
 	} else {
-		if _, err := os.Stat(c.SourcePath); err != nil {
-			errs = packer.MultiErrorAppend(errs,
-				fmt.Errorf("source_path is invalid: %s", err))
+		c.SourcePath, err = common.ValidatedURL(c.SourcePath)
+		if err != nil {
+			errs = packer.MultiErrorAppend(errs, fmt.Errorf("source_path is invalid: %s", err))
 		}
+		fileOK := common.FileExistsLocally(c.SourcePath)
+		if !fileOK {
+			packer.MultiErrorAppend(errs,
+				fmt.Errorf("Source file '%s' needs to exist at time of config validation!", c.SourcePath))
+		}
+
 	}
 
 	validMode := false

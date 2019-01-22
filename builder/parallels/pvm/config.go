@@ -4,30 +4,31 @@ import (
 	"fmt"
 	"os"
 
-	parallelscommon "github.com/mitchellh/packer/builder/parallels/common"
-	"github.com/mitchellh/packer/common"
-	"github.com/mitchellh/packer/helper/config"
-	"github.com/mitchellh/packer/packer"
-	"github.com/mitchellh/packer/template/interpolate"
+	parallelscommon "github.com/hashicorp/packer/builder/parallels/common"
+	"github.com/hashicorp/packer/common"
+	"github.com/hashicorp/packer/common/bootcommand"
+	"github.com/hashicorp/packer/helper/config"
+	"github.com/hashicorp/packer/packer"
+	"github.com/hashicorp/packer/template/interpolate"
 )
 
 // Config is the configuration structure for the builder.
 type Config struct {
 	common.PackerConfig                 `mapstructure:",squash"`
-	parallelscommon.FloppyConfig        `mapstructure:",squash"`
+	common.FloppyConfig                 `mapstructure:",squash"`
 	parallelscommon.OutputConfig        `mapstructure:",squash"`
 	parallelscommon.PrlctlConfig        `mapstructure:",squash"`
 	parallelscommon.PrlctlPostConfig    `mapstructure:",squash"`
 	parallelscommon.PrlctlVersionConfig `mapstructure:",squash"`
-	parallelscommon.RunConfig           `mapstructure:",squash"`
 	parallelscommon.SSHConfig           `mapstructure:",squash"`
 	parallelscommon.ShutdownConfig      `mapstructure:",squash"`
+	bootcommand.BootConfig              `mapstructure:",squash"`
 	parallelscommon.ToolsConfig         `mapstructure:",squash"`
 
-	BootCommand []string `mapstructure:"boot_command"`
-	SourcePath  string   `mapstructure:"source_path"`
-	VMName      string   `mapstructure:"vm_name"`
-	ReassignMac bool     `mapstructure:"reassign_mac"`
+	SourcePath     string `mapstructure:"source_path"`
+	SkipCompaction bool   `mapstructure:"skip_compaction"`
+	VMName         string `mapstructure:"vm_name"`
+	ReassignMAC    bool   `mapstructure:"reassign_mac"`
 
 	ctx interpolate.Context
 }
@@ -41,6 +42,7 @@ func NewConfig(raws ...interface{}) (*Config, []string, error) {
 			Exclude: []string{
 				"boot_command",
 				"prlctl",
+				"prlctl_post",
 				"parallels_tools_guest_path",
 			},
 		},
@@ -60,7 +62,7 @@ func NewConfig(raws ...interface{}) (*Config, []string, error) {
 	errs = packer.MultiErrorAppend(errs, c.PrlctlConfig.Prepare(&c.ctx)...)
 	errs = packer.MultiErrorAppend(errs, c.PrlctlPostConfig.Prepare(&c.ctx)...)
 	errs = packer.MultiErrorAppend(errs, c.PrlctlVersionConfig.Prepare(&c.ctx)...)
-	errs = packer.MultiErrorAppend(errs, c.RunConfig.Prepare(&c.ctx)...)
+	errs = packer.MultiErrorAppend(errs, c.BootConfig.Prepare(&c.ctx)...)
 	errs = packer.MultiErrorAppend(errs, c.ShutdownConfig.Prepare(&c.ctx)...)
 	errs = packer.MultiErrorAppend(errs, c.SSHConfig.Prepare(&c.ctx)...)
 	errs = packer.MultiErrorAppend(errs, c.ToolsConfig.Prepare(&c.ctx)...)

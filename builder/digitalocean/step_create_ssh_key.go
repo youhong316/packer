@@ -1,6 +1,7 @@
 package digitalocean
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
@@ -11,9 +12,9 @@ import (
 	"runtime"
 
 	"github.com/digitalocean/godo"
-	"github.com/mitchellh/multistep"
-	"github.com/mitchellh/packer/common/uuid"
-	"github.com/mitchellh/packer/packer"
+	"github.com/hashicorp/packer/common/uuid"
+	"github.com/hashicorp/packer/helper/multistep"
+	"github.com/hashicorp/packer/packer"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -24,9 +25,10 @@ type stepCreateSSHKey struct {
 	keyId int
 }
 
-func (s *stepCreateSSHKey) Run(state multistep.StateBag) multistep.StepAction {
+func (s *stepCreateSSHKey) Run(_ context.Context, state multistep.StateBag) multistep.StepAction {
 	client := state.Get("client").(*godo.Client)
 	ui := state.Get("ui").(packer.Ui)
+	c := state.Get("config").(*Config)
 
 	ui.Say("Creating temporary ssh key for droplet...")
 
@@ -40,8 +42,8 @@ func (s *stepCreateSSHKey) Run(state multistep.StateBag) multistep.StepAction {
 		Bytes:   priv_der,
 	}
 
-	// Set the private key in the statebag for later
-	state.Put("privateKey", string(pem.EncodeToMemory(&priv_blk)))
+	// Set the private key in the config for later
+	c.Comm.SSHPrivateKey = pem.EncodeToMemory(&priv_blk)
 
 	// Marshal the public key into SSH compatible format
 	// TODO properly handle the public key error
@@ -52,7 +54,7 @@ func (s *stepCreateSSHKey) Run(state multistep.StateBag) multistep.StepAction {
 	name := fmt.Sprintf("packer-%s", uuid.TimeOrderedUUID())
 
 	// Create the key!
-	key, _, err := client.Keys.Create(&godo.KeyCreateRequest{
+	key, _, err := client.Keys.Create(context.TODO(), &godo.KeyCreateRequest{
 		Name:      name,
 		PublicKey: pub_sshformat,
 	})
@@ -109,7 +111,7 @@ func (s *stepCreateSSHKey) Cleanup(state multistep.StateBag) {
 	ui := state.Get("ui").(packer.Ui)
 
 	ui.Say("Deleting temporary ssh key...")
-	_, err := client.Keys.DeleteByID(s.keyId)
+	_, err := client.Keys.DeleteByID(context.TODO(), s.keyId)
 	if err != nil {
 		log.Printf("Error cleaning up ssh key: %s", err)
 		ui.Error(fmt.Sprintf(

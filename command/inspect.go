@@ -5,7 +5,9 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/mitchellh/packer/template"
+	"github.com/hashicorp/packer/template"
+
+	"github.com/posener/complete"
 )
 
 type InspectCommand struct {
@@ -48,6 +50,11 @@ func (c *InspectCommand) Run(args []string) int {
 	} else {
 		requiredHeader := false
 		for k, v := range tpl.Variables {
+			for _, sensitive := range tpl.SensitiveVariables {
+				if ok := strings.Compare(sensitive.Default, v.Default); ok == 0 {
+					v.Default = "<sensitive>"
+				}
+			}
 			if v.Required {
 				if !requiredHeader {
 					requiredHeader = true
@@ -66,7 +73,7 @@ func (c *InspectCommand) Run(args []string) int {
 		ui.Say("Optional variables and their defaults:\n")
 		keys := make([]string, 0, len(tpl.Variables))
 		max := 0
-		for k, _ := range tpl.Variables {
+		for k := range tpl.Variables {
 			keys = append(keys, k)
 			if len(k) > max {
 				max = len(k)
@@ -79,6 +86,11 @@ func (c *InspectCommand) Run(args []string) int {
 			v := tpl.Variables[k]
 			if v.Required {
 				continue
+			}
+			for _, sensitive := range tpl.SensitiveVariables {
+				if ok := strings.Compare(sensitive.Default, v.Default); ok == 0 {
+					v.Default = "<sensitive>"
+				}
 			}
 
 			padding := strings.Repeat(" ", max-len(k))
@@ -98,7 +110,7 @@ func (c *InspectCommand) Run(args []string) int {
 	} else {
 		keys := make([]string, 0, len(tpl.Builders))
 		max := 0
-		for k, _ := range tpl.Builders {
+		for k := range tpl.Builders {
 			keys = append(keys, k)
 			if len(k) > max {
 				max = len(k)
@@ -159,4 +171,14 @@ Options:
 
 func (c *InspectCommand) Synopsis() string {
 	return "see components of a template"
+}
+
+func (c *InspectCommand) AutocompleteArgs() complete.Predictor {
+	return complete.PredictNothing
+}
+
+func (c *InspectCommand) AutocompleteFlags() complete.Flags {
+	return complete.Flags{
+		"-machine-readable": complete.PredictNothing,
+	}
 }

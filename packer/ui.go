@@ -1,6 +1,7 @@
 package packer
 
 import (
+	"bufio"
 	"bytes"
 	"errors"
 	"fmt"
@@ -36,7 +37,19 @@ type Ui interface {
 	Message(string)
 	Error(string)
 	Machine(string, ...string)
+	ProgressBar() ProgressBar
 }
+
+type NoopUi struct{}
+
+var _ Ui = new(NoopUi)
+
+func (*NoopUi) Ask(string) (string, error) { return "", errors.New("this is a noop ui") }
+func (*NoopUi) Say(string)                 { return }
+func (*NoopUi) Message(string)             { return }
+func (*NoopUi) Error(string)               { return }
+func (*NoopUi) Machine(string, ...string)  { return }
+func (*NoopUi) ProgressBar() ProgressBar   { return new(NoopProgressBar) }
 
 // ColoredUi is a UI that is colored using terminal colors.
 type ColoredUi struct {
@@ -45,15 +58,19 @@ type ColoredUi struct {
 	Ui         Ui
 }
 
-// TargettedUi is a UI that wraps another UI implementation and modifies
+var _ Ui = new(ColoredUi)
+
+// TargetedUI is a UI that wraps another UI implementation and modifies
 // the output to indicate a specific target. Specifically, all Say output
 // is prefixed with the target name. Message output is not prefixed but
 // is offset by the length of the target so that output is lined up properly
 // with Say output. Machine-readable output has the proper target set.
-type TargettedUi struct {
+type TargetedUI struct {
 	Target string
 	Ui     Ui
 }
+
+var _ Ui = new(TargetedUI)
 
 // The BasicUI is a UI that reads and writes from a standard Go reader
 // and writer. It is safe to be called from multiple goroutines. Machine
@@ -64,6 +81,14 @@ type BasicUi struct {
 	ErrorWriter io.Writer
 	l           sync.Mutex
 	interrupted bool
+	scanner     *bufio.Scanner
+	StackableProgressBar
+}
+
+var _ Ui = new(BasicUi)
+
+func (bu *BasicUi) ProgressBar() ProgressBar {
+	return &bu.StackableProgressBar
 }
 
 // MachineReadableUi is a UI that only outputs machine-readable output
@@ -71,6 +96,8 @@ type BasicUi struct {
 type MachineReadableUi struct {
 	Writer io.Writer
 }
+
+var _ Ui = new(MachineReadableUi)
 
 func (u *ColoredUi) Ask(query string) (string, error) {
 	return u.Ui.Ask(u.colorize(query, u.Color, true))
@@ -96,6 +123,10 @@ func (u *ColoredUi) Error(message string) {
 func (u *ColoredUi) Machine(t string, args ...string) {
 	// Don't colorize machine-readable output
 	u.Ui.Machine(t, args...)
+}
+
+func (u *ColoredUi) ProgressBar() ProgressBar {
+	return u.Ui.ProgressBar() //TODO(adrien): color me
 }
 
 func (u *ColoredUi) colorize(message string, color UiColor, bold bool) string {
@@ -130,28 +161,32 @@ func (u *ColoredUi) supportsColors() bool {
 	return cygwin
 }
 
-func (u *TargettedUi) Ask(query string) (string, error) {
+func (u *TargetedUI) Ask(query string) (string, error) {
 	return u.Ui.Ask(u.prefixLines(true, query))
 }
 
-func (u *TargettedUi) Say(message string) {
+func (u *TargetedUI) Say(message string) {
 	u.Ui.Say(u.prefixLines(true, message))
 }
 
-func (u *TargettedUi) Message(message string) {
+func (u *TargetedUI) Message(message string) {
 	u.Ui.Message(u.prefixLines(false, message))
 }
 
-func (u *TargettedUi) Error(message string) {
+func (u *TargetedUI) Error(message string) {
 	u.Ui.Error(u.prefixLines(true, message))
 }
 
-func (u *TargettedUi) Machine(t string, args ...string) {
+func (u *TargetedUI) Machine(t string, args ...string) {
 	// Prefix in the target, then pass through
 	u.Ui.Machine(fmt.Sprintf("%s,%s", u.Target, t), args...)
 }
 
-func (u *TargettedUi) prefixLines(arrow bool, message string) string {
+func (u *TargetedUI) ProgressBar() ProgressBar {
+	return u.Ui.ProgressBar()
+}
+
+func (u *TargetedUI) prefixLines(arrow bool, message string) string {
 	arrowText := "==>"
 	if !arrow {
 		arrowText = strings.Repeat(" ", len(arrowText))
@@ -174,8 +209,11 @@ func (rw *BasicUi) Ask(query string) (string, error) {
 		return "", errors.New("interrupted")
 	}
 
+	if rw.scanner == nil {
+		rw.scanner = bufio.NewScanner(rw.Reader)
+	}
 	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, os.Interrupt)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
 	defer signal.Stop(sigCh)
 
 	log.Printf("ui: ask: %s", query)
@@ -188,10 +226,13 @@ func (rw *BasicUi) Ask(query string) (string, error) {
 	result := make(chan string, 1)
 	go func() {
 		var line string
-		if _, err := fmt.Fscanln(rw.Reader, &line); err != nil {
-			log.Printf("ui: scan err: %s", err)
+		if rw.scanner.Scan() {
+			line = rw.scanner.Text()
 		}
-
+		if err := rw.scanner.Err(); err != nil {
+			log.Printf("ui: scan err: %s", err)
+			return
+		}
 		result <- line
 	}()
 
@@ -296,4 +337,42 @@ func (u *MachineReadableUi) Machine(category string, args ...string) {
 			panic(err)
 		}
 	}
+}
+
+func (u *MachineReadableUi) ProgressBar() ProgressBar {
+	return new(NoopProgressBar)
+}
+
+// TimestampedUi is a UI that wraps another UI implementation and prefixes
+// prefixes each message with an RFC3339 timestamp
+type TimestampedUi struct {
+	Ui Ui
+}
+
+var _ Ui = new(TimestampedUi)
+
+func (u *TimestampedUi) Ask(query string) (string, error) {
+	return u.Ui.Ask(query)
+}
+
+func (u *TimestampedUi) Say(message string) {
+	u.Ui.Say(u.timestampLine(message))
+}
+
+func (u *TimestampedUi) Message(message string) {
+	u.Ui.Message(u.timestampLine(message))
+}
+
+func (u *TimestampedUi) Error(message string) {
+	u.Ui.Error(u.timestampLine(message))
+}
+
+func (u *TimestampedUi) Machine(message string, args ...string) {
+	u.Ui.Machine(message, args...)
+}
+
+func (u *TimestampedUi) ProgressBar() ProgressBar { return u.Ui.ProgressBar() }
+
+func (u *TimestampedUi) timestampLine(string string) string {
+	return fmt.Sprintf("%v: %v", time.Now().Format(time.RFC3339), string)
 }

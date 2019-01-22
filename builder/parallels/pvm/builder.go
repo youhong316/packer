@@ -5,11 +5,11 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/mitchellh/multistep"
-	parallelscommon "github.com/mitchellh/packer/builder/parallels/common"
-	"github.com/mitchellh/packer/common"
-	"github.com/mitchellh/packer/helper/communicator"
-	"github.com/mitchellh/packer/packer"
+	parallelscommon "github.com/hashicorp/packer/builder/parallels/common"
+	"github.com/hashicorp/packer/common"
+	"github.com/hashicorp/packer/helper/communicator"
+	"github.com/hashicorp/packer/helper/multistep"
+	"github.com/hashicorp/packer/packer"
 )
 
 // Builder implements packer.Builder and builds the actual Parallels
@@ -36,12 +36,13 @@ func (b *Builder) Run(ui packer.Ui, hook packer.Hook, cache packer.Cache) (packe
 	// Create the driver that we'll use to communicate with Parallels
 	driver, err := parallelscommon.NewDriver()
 	if err != nil {
-		return nil, fmt.Errorf("Failed creating Paralles driver: %s", err)
+		return nil, fmt.Errorf("Failed creating Parallels driver: %s", err)
 	}
 
 	// Set up the state.
 	state := new(multistep.BasicStateBag)
 	state.Put("config", b.config)
+	state.Put("debug", b.config.PackerDebug)
 	state.Put("driver", driver)
 	state.Put("hook", hook)
 	state.Put("ui", ui)
@@ -58,7 +59,8 @@ func (b *Builder) Run(ui packer.Ui, hook packer.Hook, cache packer.Cache) (packe
 			Path:  b.config.OutputDir,
 		},
 		&common.StepCreateFloppy{
-			Files: b.config.FloppyFiles,
+			Files:       b.config.FloppyConfig.FloppyFiles,
+			Directories: b.config.FloppyConfig.FloppyDirectories,
 		},
 		&StepImport{
 			Name:       b.config.VMName,
@@ -72,19 +74,19 @@ func (b *Builder) Run(ui packer.Ui, hook packer.Hook, cache packer.Cache) (packe
 			Commands: b.config.Prlctl,
 			Ctx:      b.config.ctx,
 		},
-		&parallelscommon.StepRun{
-			BootWait: b.config.BootWait,
-		},
+		&parallelscommon.StepRun{},
 		&parallelscommon.StepTypeBootCommand{
-			BootCommand:    b.config.BootCommand,
+			BootCommand:    b.config.FlatBootCommand(),
+			BootWait:       b.config.BootWait,
 			HostInterfaces: []string{},
 			VMName:         b.config.VMName,
 			Ctx:            b.config.ctx,
+			GroupInterval:  b.config.BootConfig.BootGroupInterval,
 		},
 		&communicator.StepConnect{
 			Config:    &b.config.SSHConfig.Comm,
 			Host:      parallelscommon.CommHost,
-			SSHConfig: parallelscommon.SSHConfigFunc(b.config.SSHConfig),
+			SSHConfig: b.config.SSHConfig.Comm.SSHConfigFunc(),
 		},
 		&parallelscommon.StepUploadVersion{
 			Path: b.config.PrlctlVersionFile,
@@ -100,21 +102,20 @@ func (b *Builder) Run(ui packer.Ui, hook packer.Hook, cache packer.Cache) (packe
 			Command: b.config.ShutdownCommand,
 			Timeout: b.config.ShutdownTimeout,
 		},
+		&common.StepCleanupTempKeys{
+			Comm: &b.config.SSHConfig.Comm,
+		},
 		&parallelscommon.StepPrlctl{
 			Commands: b.config.PrlctlPost,
 			Ctx:      b.config.ctx,
 		},
+		&parallelscommon.StepCompactDisk{
+			Skip: b.config.SkipCompaction,
+		},
 	}
 
 	// Run the steps.
-	if b.config.PackerDebug {
-		b.runner = &multistep.DebugRunner{
-			Steps:   steps,
-			PauseFn: common.MultistepDebugFn(ui),
-		}
-	} else {
-		b.runner = &multistep.BasicRunner{Steps: steps}
-	}
+	b.runner = common.NewRunnerWithPauseFn(steps, b.config.PackerConfig, ui, state)
 	b.runner.Run(state)
 
 	// Report any errors.

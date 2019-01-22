@@ -11,12 +11,14 @@ import (
 	"regexp"
 	"runtime"
 
+	"github.com/biogo/hts/bgzf"
+	"github.com/hashicorp/packer/common"
+	"github.com/hashicorp/packer/helper/config"
+	"github.com/hashicorp/packer/packer"
+	"github.com/hashicorp/packer/template/interpolate"
 	"github.com/klauspost/pgzip"
-	"github.com/mitchellh/packer/common"
-	"github.com/mitchellh/packer/helper/config"
-	"github.com/mitchellh/packer/packer"
-	"github.com/mitchellh/packer/template/interpolate"
 	"github.com/pierrec/lz4"
+	"github.com/ulikunitz/xz"
 )
 
 var (
@@ -36,6 +38,7 @@ type Config struct {
 
 	// Fields from config file
 	OutputPath        string `mapstructure:"output"`
+	Format            string `mapstructure:"format"`
 	CompressionLevel  int    `mapstructure:"compression_level"`
 	KeepInputArtifact bool   `mapstructure:"keep_input_artifact"`
 
@@ -115,6 +118,10 @@ func (p *PostProcessor) PostProcess(ui packer.Ui, artifact packer.Artifact) (pac
 	keep := p.config.KeepInputArtifact
 	newArtifact := &Artifact{Path: target}
 
+	if err = os.MkdirAll(filepath.Dir(target), os.FileMode(0755)); err != nil {
+		return nil, false, fmt.Errorf(
+			"Unable to create dir for archive %s: %s", target, err)
+	}
 	outputFile, err := os.Create(target)
 	if err != nil {
 		return nil, false, fmt.Errorf(
@@ -126,10 +133,20 @@ func (p *PostProcessor) PostProcess(ui packer.Ui, artifact packer.Artifact) (pac
 	// compression writer. Otherwise it's just a file.
 	var output io.WriteCloser
 	switch p.config.Algorithm {
+	case "bgzf":
+		ui.Say(fmt.Sprintf("Using bgzf compression with %d cores for %s",
+			runtime.GOMAXPROCS(-1), target))
+		output, err = makeBGZFWriter(outputFile, p.config.CompressionLevel)
+		defer output.Close()
 	case "lz4":
 		ui.Say(fmt.Sprintf("Using lz4 compression with %d cores for %s",
 			runtime.GOMAXPROCS(-1), target))
 		output, err = makeLZ4Writer(outputFile, p.config.CompressionLevel)
+		defer output.Close()
+	case "xz":
+		ui.Say(fmt.Sprintf("Using xz compression with 1 core for %s (library does not support MT)",
+			target))
+		output, err = makeXZWriter(outputFile)
 		defer output.Close()
 	case "pgzip":
 		ui.Say(fmt.Sprintf("Using pgzip compression with %d cores for %s",
@@ -190,15 +207,22 @@ func (p *PostProcessor) PostProcess(ui packer.Ui, artifact packer.Artifact) (pac
 }
 
 func (config *Config) detectFromFilename() {
+	var result [][]string
 
 	extensions := map[string]string{
-		"tar": "tar",
-		"zip": "zip",
-		"gz":  "pgzip",
-		"lz4": "lz4",
+		"tar":  "tar",
+		"zip":  "zip",
+		"gz":   "pgzip",
+		"lz4":  "lz4",
+		"bgzf": "bgzf",
+		"xz":   "xz",
 	}
 
-	result := filenamePattern.FindAllStringSubmatch(config.OutputPath, -1)
+	if config.Format == "" {
+		result = filenamePattern.FindAllStringSubmatch(config.OutputPath, -1)
+	} else {
+		result = filenamePattern.FindAllStringSubmatch(fmt.Sprintf("%s.%s", config.OutputPath, config.Format), -1)
+	}
 
 	// No dots. Bail out with defaults.
 	if len(result) == 0 {
@@ -240,12 +264,28 @@ func (config *Config) detectFromFilename() {
 	return
 }
 
+func makeBGZFWriter(output io.WriteCloser, compressionLevel int) (io.WriteCloser, error) {
+	bgzfWriter, err := bgzf.NewWriterLevel(output, compressionLevel, runtime.GOMAXPROCS(-1))
+	if err != nil {
+		return nil, ErrInvalidCompressionLevel
+	}
+	return bgzfWriter, nil
+}
+
 func makeLZ4Writer(output io.WriteCloser, compressionLevel int) (io.WriteCloser, error) {
 	lzwriter := lz4.NewWriter(output)
 	if compressionLevel > gzip.DefaultCompression {
 		lzwriter.Header.HighCompression = true
 	}
 	return lzwriter, nil
+}
+
+func makeXZWriter(output io.WriteCloser) (io.WriteCloser, error) {
+	xzwriter, err := xz.NewWriter(output)
+	if err != nil {
+		return nil, err
+	}
+	return xzwriter, nil
 }
 
 func makePgzipWriter(output io.WriteCloser, compressionLevel int) (io.WriteCloser, error) {
@@ -277,6 +317,9 @@ func createTarArchive(files []string, output io.WriteCloser) error {
 		if err != nil {
 			return fmt.Errorf("Failed to create tar header for %s: %s", path, err)
 		}
+
+		// workaround for archive format on go >=1.10
+		setHeaderFormat(header)
 
 		if err := archive.WriteHeader(header); err != nil {
 			return fmt.Errorf("Failed to write tar header for %s: %s", path, err)

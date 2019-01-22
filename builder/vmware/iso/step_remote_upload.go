@@ -1,25 +1,28 @@
 package iso
 
 import (
+	"context"
 	"fmt"
-	"github.com/mitchellh/multistep"
-	vmwcommon "github.com/mitchellh/packer/builder/vmware/common"
-	"github.com/mitchellh/packer/packer"
 	"log"
+
+	vmwcommon "github.com/hashicorp/packer/builder/vmware/common"
+	"github.com/hashicorp/packer/helper/multistep"
+	"github.com/hashicorp/packer/packer"
 )
 
 // stepRemoteUpload uploads some thing from the state bag to a remote driver
 // (if it can) and stores that new remote path into the state bag.
 type stepRemoteUpload struct {
-	Key     string
-	Message string
+	Key       string
+	Message   string
+	DoCleanup bool
 }
 
-func (s *stepRemoteUpload) Run(state multistep.StateBag) multistep.StepAction {
+func (s *stepRemoteUpload) Run(_ context.Context, state multistep.StateBag) multistep.StepAction {
 	driver := state.Get("driver").(vmwcommon.Driver)
 	ui := state.Get("ui").(packer.Ui)
 
-	remote, ok := driver.(RemoteDriver)
+	remote, ok := driver.(vmwcommon.RemoteDriver)
 	if !ok {
 		return multistep.ActionContinue
 	}
@@ -33,6 +36,17 @@ func (s *stepRemoteUpload) Run(state multistep.StateBag) multistep.StepAction {
 	checksum := config.ISOChecksum
 	checksumType := config.ISOChecksumType
 
+	if esx5, ok := remote.(*vmwcommon.ESX5Driver); ok {
+		remotePath := esx5.CachePath(path)
+
+		if esx5.VerifyChecksum(checksumType, checksum, remotePath) {
+			ui.Say("Remote cache was verified skipping remote upload...")
+			state.Put(s.Key, remotePath)
+			return multistep.ActionContinue
+		}
+
+	}
+
 	ui.Say(s.Message)
 	log.Printf("Remote uploading: %s", path)
 	newPath, err := remote.UploadISO(path, checksum, checksumType)
@@ -42,10 +56,31 @@ func (s *stepRemoteUpload) Run(state multistep.StateBag) multistep.StepAction {
 		ui.Error(err.Error())
 		return multistep.ActionHalt
 	}
-
 	state.Put(s.Key, newPath)
+
 	return multistep.ActionContinue
 }
 
 func (s *stepRemoteUpload) Cleanup(state multistep.StateBag) {
+	if !s.DoCleanup {
+		return
+	}
+
+	driver := state.Get("driver").(vmwcommon.Driver)
+
+	remote, ok := driver.(vmwcommon.RemoteDriver)
+	if !ok {
+		return
+	}
+
+	path, ok := state.Get(s.Key).(string)
+	if !ok {
+		return
+	}
+
+	log.Printf("Cleaning up remote path: %s", path)
+	err := remote.RemoveCache(path)
+	if err != nil {
+		log.Printf("Error cleaning up: %s", err)
+	}
 }

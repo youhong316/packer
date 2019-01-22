@@ -6,8 +6,8 @@ import (
 
 	"github.com/hashicorp/go-multierror"
 	"github.com/hashicorp/go-version"
-	"github.com/mitchellh/packer/template"
-	"github.com/mitchellh/packer/template/interpolate"
+	"github.com/hashicorp/packer/template"
+	"github.com/hashicorp/packer/template/interpolate"
 )
 
 // Core is the main executor of Packer. If Packer is being used as a
@@ -19,15 +19,17 @@ type Core struct {
 	variables  map[string]string
 	builds     map[string]*template.Builder
 	version    string
+	secrets    []string
 }
 
 // CoreConfig is the structure for initializing a new Core. Once a CoreConfig
 // is used to initialize a Core, it shouldn't be re-used or modified again.
 type CoreConfig struct {
-	Components ComponentFinder
-	Template   *template.Template
-	Variables  map[string]string
-	Version    string
+	Components         ComponentFinder
+	Template           *template.Template
+	Variables          map[string]string
+	SensitiveVariables []string
+	Version            string
 }
 
 // The function type used to lookup Builder implementations.
@@ -60,14 +62,18 @@ func NewCore(c *CoreConfig) (*Core, error) {
 		variables:  c.Variables,
 		version:    c.Version,
 	}
+
 	if err := result.validate(); err != nil {
 		return nil, err
 	}
 	if err := result.init(); err != nil {
 		return nil, err
 	}
+	for _, secret := range result.secrets {
+		LogSecretFilter.Set(secret)
+	}
 
-	// Go through and interpolate all the build names. We shuld be able
+	// Go through and interpolate all the build names. We should be able
 	// to do this at this point with the variables.
 	result.builds = make(map[string]*template.Builder)
 	for _, b := range c.Template.Builders {
@@ -87,7 +93,7 @@ func NewCore(c *CoreConfig) (*Core, error) {
 // BuildNames returns the builds that are available in this configured core.
 func (c *Core) BuildNames() []string {
 	r := make([]string, 0, len(c.builds))
-	for n, _ := range c.builds {
+	for n := range c.builds {
 		r = append(r, n)
 	}
 	sort.Strings(r)
@@ -154,6 +160,7 @@ func (c *Core) Build(n string) (Build, error) {
 		}
 
 		provisioners = append(provisioners, coreBuildProvisioner{
+			pType:       rawP.Type,
 			provisioner: provisioner,
 			config:      config,
 		})
@@ -299,6 +306,16 @@ func (c *Core) init() error {
 		}
 
 		c.variables[k] = def
+	}
+
+	for _, v := range c.Template.SensitiveVariables {
+		def, err := interpolate.Render(v.Default, ctx)
+		if err != nil {
+			return fmt.Errorf(
+				"error interpolating default value for '%#v': %s",
+				v, err)
+		}
+		c.secrets = append(c.secrets, def)
 	}
 
 	// Interpolate the push configuration

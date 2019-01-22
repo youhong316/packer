@@ -11,22 +11,31 @@ import (
 	"path/filepath"
 	"text/template"
 
+	"github.com/hashicorp/packer/common"
+	"github.com/hashicorp/packer/helper/config"
+	"github.com/hashicorp/packer/packer"
+	"github.com/hashicorp/packer/packer/tmp"
+	"github.com/hashicorp/packer/template/interpolate"
 	"github.com/mitchellh/mapstructure"
-	"github.com/mitchellh/packer/common"
-	"github.com/mitchellh/packer/helper/config"
-	"github.com/mitchellh/packer/packer"
-	"github.com/mitchellh/packer/template/interpolate"
 )
 
 var builtins = map[string]string{
-	"mitchellh.amazonebs":       "aws",
-	"mitchellh.amazon.instance": "aws",
-	"mitchellh.virtualbox":      "virtualbox",
-	"mitchellh.vmware":          "vmware",
-	"pearkes.digitalocean":      "digitalocean",
-	"packer.parallels":          "parallels",
-	"MSOpenTech.hyperv":         "hyperv",
-	"transcend.qemu":            "libvirt",
+	"mitchellh.amazonebs":                 "aws",
+	"mitchellh.amazon.instance":           "aws",
+	"mitchellh.virtualbox":                "virtualbox",
+	"mitchellh.vmware":                    "vmware",
+	"mitchellh.vmware-esx":                "vmware",
+	"pearkes.digitalocean":                "digitalocean",
+	"packer.googlecompute":                "google",
+	"hashicorp.scaleway":                  "scaleway",
+	"packer.parallels":                    "parallels",
+	"MSOpenTech.hyperv":                   "hyperv",
+	"transcend.qemu":                      "libvirt",
+	"ustream.lxc":                         "lxc",
+	"Azure.ResourceManagement.VMImage":    "azure",
+	"packer.post-processor.docker-import": "docker",
+	"packer.post-processor.docker-tag":    "docker",
+	"packer.post-processor.docker-push":   "docker",
 }
 
 type Config struct {
@@ -87,7 +96,7 @@ func (p *PostProcessor) PostProcessProvider(name string, provider Provider, ui p
 	}
 
 	// Create a temporary directory for us to build the contents of the box in
-	dir, err := ioutil.TempDir("", "packer")
+	dir, err := tmp.Dir("packer")
 	if err != nil {
 		return nil, false, err
 	}
@@ -219,6 +228,8 @@ func providerForName(name string) Provider {
 	switch name {
 	case "aws":
 		return new(AWSProvider)
+	case "scaleway":
+		return new(ScalewayProvider)
 	case "digitalocean":
 		return new(DigitalOceanProvider)
 	case "virtualbox":
@@ -231,12 +242,20 @@ func providerForName(name string) Provider {
 		return new(HypervProvider)
 	case "libvirt":
 		return new(LibVirtProvider)
+	case "google":
+		return new(GoogleProvider)
+	case "lxc":
+		return new(LXCProvider)
+	case "azure":
+		return new(AzureProvider)
+	case "docker":
+		return new(DockerProvider)
 	default:
 		return nil
 	}
 }
 
-// OutputPathTemplate is the structure that is availalable within the
+// OutputPathTemplate is the structure that is available within the
 // OutputPath variables.
 type outputPathTemplate struct {
 	ArtifactId string

@@ -1,58 +1,72 @@
 package common
 
 import (
+	"context"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"runtime"
 
 	"github.com/aws/aws-sdk-go/service/ec2"
-	"github.com/mitchellh/multistep"
-	"github.com/mitchellh/packer/packer"
+	"github.com/hashicorp/packer/helper/communicator"
+	"github.com/hashicorp/packer/helper/multistep"
+	"github.com/hashicorp/packer/packer"
 )
 
 type StepKeyPair struct {
-	Debug                bool
-	DebugKeyPath         string
-	TemporaryKeyPairName string
-	KeyPairName          string
-	PrivateKeyFile       string
+	Debug        bool
+	Comm         *communicator.Config
+	DebugKeyPath string
 
-	keyName string
+	doCleanup bool
 }
 
-func (s *StepKeyPair) Run(state multistep.StateBag) multistep.StepAction {
-	if s.PrivateKeyFile != "" {
-		privateKeyBytes, err := ioutil.ReadFile(s.PrivateKeyFile)
+func (s *StepKeyPair) Run(_ context.Context, state multistep.StateBag) multistep.StepAction {
+	ui := state.Get("ui").(packer.Ui)
+
+	if s.Comm.SSHPrivateKeyFile != "" {
+		ui.Say("Using existing SSH private key")
+		privateKeyBytes, err := s.Comm.ReadSSHPrivateKeyFile()
 		if err != nil {
-			state.Put("error", fmt.Errorf(
-				"Error loading configured private key file: %s", err))
+			state.Put("error", err)
 			return multistep.ActionHalt
 		}
 
-		state.Put("keyPair", s.KeyPairName)
-		state.Put("privateKey", string(privateKeyBytes))
+		s.Comm.SSHPrivateKey = privateKeyBytes
 
 		return multistep.ActionContinue
 	}
 
-	ec2conn := state.Get("ec2").(*ec2.EC2)
-	ui := state.Get("ui").(packer.Ui)
+	if s.Comm.SSHAgentAuth && s.Comm.SSHKeyPairName == "" {
+		ui.Say("Using SSH Agent with key pair in Source AMI")
+		return multistep.ActionContinue
+	}
 
-	ui.Say(fmt.Sprintf("Creating temporary keypair: %s", s.TemporaryKeyPairName))
+	if s.Comm.SSHAgentAuth && s.Comm.SSHKeyPairName != "" {
+		ui.Say(fmt.Sprintf("Using SSH Agent for existing key pair %s", s.Comm.SSHKeyPairName))
+		return multistep.ActionContinue
+	}
+
+	if s.Comm.SSHTemporaryKeyPairName == "" {
+		ui.Say("Not using temporary keypair")
+		s.Comm.SSHKeyPairName = ""
+		return multistep.ActionContinue
+	}
+
+	ec2conn := state.Get("ec2").(*ec2.EC2)
+
+	ui.Say(fmt.Sprintf("Creating temporary keypair: %s", s.Comm.SSHTemporaryKeyPairName))
 	keyResp, err := ec2conn.CreateKeyPair(&ec2.CreateKeyPairInput{
-		KeyName: &s.TemporaryKeyPairName})
+		KeyName: &s.Comm.SSHTemporaryKeyPairName})
 	if err != nil {
 		state.Put("error", fmt.Errorf("Error creating temporary keypair: %s", err))
 		return multistep.ActionHalt
 	}
 
-	// Set the keyname so we know to delete it later
-	s.keyName = s.TemporaryKeyPairName
+	s.doCleanup = true
 
-	// Set some state data for use in future steps
-	state.Put("keyPair", s.keyName)
-	state.Put("privateKey", *keyResp.KeyMaterial)
+	// Set some data for use in future steps
+	s.Comm.SSHKeyPairName = s.Comm.SSHTemporaryKeyPairName
+	s.Comm.SSHPrivateKey = []byte(*keyResp.KeyMaterial)
 
 	// If we're in debug mode, output the private key to the working
 	// directory.
@@ -84,10 +98,7 @@ func (s *StepKeyPair) Run(state multistep.StateBag) multistep.StepAction {
 }
 
 func (s *StepKeyPair) Cleanup(state multistep.StateBag) {
-	// If no key name is set, then we never created it, so just return
-	// If we used an SSH private key file, do not go about deleting
-	// keypairs
-	if s.PrivateKeyFile != "" {
+	if !s.doCleanup {
 		return
 	}
 
@@ -96,10 +107,10 @@ func (s *StepKeyPair) Cleanup(state multistep.StateBag) {
 
 	// Remove the keypair
 	ui.Say("Deleting temporary keypair...")
-	_, err := ec2conn.DeleteKeyPair(&ec2.DeleteKeyPairInput{KeyName: &s.keyName})
+	_, err := ec2conn.DeleteKeyPair(&ec2.DeleteKeyPairInput{KeyName: &s.Comm.SSHTemporaryKeyPairName})
 	if err != nil {
 		ui.Error(fmt.Sprintf(
-			"Error cleaning up keypair. Please delete the key manually: %s", s.keyName))
+			"Error cleaning up keypair. Please delete the key manually: %s", s.Comm.SSHTemporaryKeyPairName))
 	}
 
 	// Also remove the physical key if we're debugging.

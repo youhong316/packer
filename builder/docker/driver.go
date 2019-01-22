@@ -11,7 +11,7 @@ import (
 // a mock driver can be shimmed in.
 type Driver interface {
 	// Commit the container to a tag
-	Commit(id string) (string, error)
+	Commit(id string, author string, changes []string, message string) (string, error)
 
 	// Delete an image that is imported into Docker
 	DeleteImage(id string) error
@@ -20,7 +20,7 @@ type Driver interface {
 	Export(id string, dst io.Writer) error
 
 	// Import imports a container from a tar file
-	Import(path, repo string) (string, error)
+	Import(path string, changes []string, repo string) (string, error)
 
 	// IPAddress returns the address of the container that can be used
 	// for external access.
@@ -28,7 +28,7 @@ type Driver interface {
 
 	// Login. This will lock the driver from performing another Login
 	// until Logout is called. Therefore, any users MUST call Logout.
-	Login(repo, email, username, password string) error
+	Login(repo, username, password string) error
 
 	// Logout. This can only be called if Login succeeded.
 	Logout(repo string) error
@@ -64,6 +64,7 @@ type ContainerConfig struct {
 	Image      string
 	RunCommand []string
 	Volumes    map[string]string
+	Privileged bool
 }
 
 // This is the template that is used for the RunCommand in the ContainerConfig.
